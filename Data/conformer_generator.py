@@ -1,16 +1,15 @@
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np 
-    
-    
-class ConformrGenerator:
-    def __init__(self, num_conformars=20, random_seed=42, optimize=True):
-        self.num_conformars = num_conformars
+
+class ConformerGenerator:
+    def __init__(self, num_conformers=20, random_seed=42, optimize=True):
+        self.num_conformers = num_conformers
         self.random_seed = random_seed
         self.optimize = optimize
     
-    def generate_conformers(self, smiles):
-        """Conformar generation from smiles"""
+    def generate(self, smiles):
+        """Conformer generation from smiles"""
 
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -25,7 +24,7 @@ class ConformrGenerator:
         
         conformer_ids = AllChem.EmbedMultipleConfs(
             mol,
-            numConfs=self.num_conformars,
+            numConfs=self.num_conformers,
             params=params
         )
         if len(conformer_ids) == 0:
@@ -63,12 +62,9 @@ class ConformrGenerator:
         
         conformer_data.sort(key=lambda x: x['energy'])
         
-        return{
+        return {
             'smiles': smiles,
             'atom_types': atom_types,
             'bonds': bonds,
             'conformers': conformer_data
         }
-
-        
-        

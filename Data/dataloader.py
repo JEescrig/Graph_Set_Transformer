@@ -1,8 +1,8 @@
 import torch
-from torch.utilis.data import DAtaset
-import pandas as pandas
+from torch.utils.data import Dataset
+import pandas as pd
 from typing import List, Dict, Optional
-from conformer_generator import conformer_generator
+from conformer_generator import ConformerGenerator
 from preprocessing import MoleculePreprocessor
 
 class ConformerDataset(Dataset):
@@ -19,7 +19,7 @@ class ConformerDataset(Dataset):
         self.targets = targets
         
         self.generator = ConformerGenerator(
-            num=conformers=num_conformers,
+            num_conformers=num_conformers,
             random_seed=42,
             optimize=True
         )
@@ -40,17 +40,17 @@ class ConformerDataset(Dataset):
         for idx , smiles in enumerate(self.smiles_list):
             try:
                 mol_data = self.generator.generate(smiles)
-                processed_conformers = self.preprocessor.proces_all_conformers(mol_data)
+                processed_conformers = self.preprocessor.process_all_conformers(mol_data)
 
                 self.data.append({
-                    'smiles': smles,
+                    'smiles': smiles,
                     'mol_data': mol_data,
-                    'conformers': preprocessed_conformers,
+                    'conformers': processed_conformers,
                     'target': self.targets[idx]
                 })
 
-                if (idx + 1) % 100 ==0:
-                    print(f"Processed {idx + 1}/{len(self.smiles_list)} molceules")
+                if (idx + 1) % 100 == 0:
+                    print(f"Processed {idx + 1}/{len(self.smiles_list)} molecules")
             except Exception as e:
                 print(f"Failed to process molecule {smiles}: {str(e)}")
                 continue
@@ -62,12 +62,19 @@ class ConformerDataset(Dataset):
     
     def __getitem__(self, idx):
         item = self.data[idx]
-        return{
+        return {
             'molecule_id': idx,
             'smiles': item['smiles'],
             'mol_data': item['mol_data'],
             'conformers': item['conformers'],
-            'target':torch.tensor(item['target'], dtype=torch.float32)
+            'target': torch.tensor(item['target'], dtype=torch.float32)
         }
     
-    
+    @classmethod
+    def from_csv(cls, csv_path, smiles_col, target_col, **kwargs):
+        df = pd.read_csv(csv_path)
+        return cls(
+            smiles_list=df[smiles_col].tolist(),
+            targets=df[target_col].tolist(),
+            **kwargs
+        )

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import rdkit.Chem.AllChem as AllChem
+from rdkit import Chem
 import torch.nn.functional as F
 
 class MoleculePreprocessor:
@@ -86,6 +87,10 @@ class MoleculePreprocessor:
         return edge_index
     
     def process_conformer(self, mol_data, conformer_idx=0, mol=None):
+        if mol is None:
+            mol = Chem.MolFromSmiles(mol_data['smiles'])
+            mol = Chem.AddHs(mol)
+
         conformer = mol_data['conformers'][conformer_idx]
         positions = torch.tensor(conformer['coords'], dtype=torch.float)
 
@@ -94,7 +99,7 @@ class MoleculePreprocessor:
 
         energy = conformer['energy']
 
-        return{
+        return {
             'atom_features': atom_features,
             'edge_index': edge_index,
             'positions': positions,
@@ -103,6 +108,10 @@ class MoleculePreprocessor:
     
     def process_all_conformers(self, mol_data, mol=None):
         processed = []
+        
+        if mol is None:
+            mol = Chem.MolFromSmiles(mol_data['smiles'])
+            mol = Chem.AddHs(mol)
 
         for i in range(len(mol_data['conformers'])):
             processed.append(self.process_conformer(mol_data, conformer_idx=i, mol=mol))
