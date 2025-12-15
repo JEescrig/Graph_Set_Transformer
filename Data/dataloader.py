@@ -78,3 +78,10 @@ class ConformerDataset(Dataset):
             targets=df[target_col].tolist(),
             **kwargs
         )
+    def get_num_conformers(self, idx):
+        return len(self.data[idx]['conformers'])
+    
+    def get_conformer(self, mol_idx, conf_idx):
+        return self.data[mol_idx]['conformers'][conf_idx]
+
+

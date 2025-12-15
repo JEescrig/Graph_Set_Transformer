@@ -8,3 +8,7 @@ venv/
 .env
 .ipynb_checkpoints/
 .DS_Store
+*.pkl
+*.sdf
+*.zip
+*.pth
