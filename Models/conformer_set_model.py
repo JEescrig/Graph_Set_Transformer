@@ -107,10 +107,11 @@ class ConformerSetModel(nn.Module):
         for mol_idx, conf_batch in enumerate(conformer_batches):
             x = conf_batch['x'].to(device)
             pos = conf_batch['pos'].to(device)
-            adj_mat = conf_batch['adj_mat'].to(device) if 'adj_mat' in conf_batch else None
+            # Don't use adj_mat - let EGNN consider all atom pairs based on distance
+            # adj_mat = conf_batch['adj_mat'].to(device) if 'adj_mat' in conf_batch else None
             
             # EGNN: [num_conf, num_atoms, feat] → [num_conf, hidden_dim]
-            embeddings = self.egnn(x, pos, adj_mat)
+            embeddings = self.egnn(x, pos, adj_mat=None)
             
             all_conformer_embeddings.append(embeddings)
             conformer_to_molecule.extend([mol_idx] * embeddings.size(0))

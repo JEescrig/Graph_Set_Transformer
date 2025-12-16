@@ -11,28 +11,59 @@ class MoleculePreprocessor:
         self.radius_cutoff = radius_cutoff
         self.max_atomic_num = max_atomic_num
 
+    # Hybridization encoding (one-hot would be better, but using ordinal for simplicity)
+    HYBRIDIZATION_MAP = {
+        Chem.rdchem.HybridizationType.SP: 1,
+        Chem.rdchem.HybridizationType.SP2: 2,
+        Chem.rdchem.HybridizationType.SP3: 3,
+        Chem.rdchem.HybridizationType.SP3D: 4,
+        Chem.rdchem.HybridizationType.SP3D2: 5,
+    }
+
     def get_atom_features(self, mol):
+        """
+        Get atom features matching MARCEL paper (Table S1).
+        Returns 9 features per atom:
+        1. AtomicNum - Atomic number
+        2. ChiralTag - Indicator of chirality
+        3. TotalDegree - Sum of implicit and explicit bonds
+        4. FormalCharge - Formal charge
+        5. TotalNumHs - Total hydrogen count
+        6. NumRadicalElectrons - Unpaired electrons
+        7. Hybridization - Orbital hybridization type
+        8. IsAromatic - In aromatic ring
+        9. IsInRing - In any ring
+        """
         features = []
         for atom in mol.GetAtoms():
             atom_features = []
 
-            # Atomic number
-            atomic_num = atom.GetAtomicNum()
-            atom_features.append(atomic_num)
+            # 1. Atomic number
+            atom_features.append(atom.GetAtomicNum())
 
-            #Degree
-            atom_features.append(atom.GetDegree())
+            # 2. Chiral tag (0=unspecified, 1=CCW, 2=CW, 3=other)
+            atom_features.append(int(atom.GetChiralTag()))
 
-            # Formal charge
+            # 3. Total degree (implicit + explicit bonds)
+            atom_features.append(atom.GetTotalDegree())
+
+            # 4. Formal charge
             atom_features.append(atom.GetFormalCharge())
 
-            #Number of Hydrogens
+            # 5. Total number of hydrogens
             atom_features.append(atom.GetTotalNumHs())
 
-            #Is aromatic
+            # 6. Number of radical electrons
+            atom_features.append(atom.GetNumRadicalElectrons())
+
+            # 7. Hybridization (ordinal encoded)
+            hyb = atom.GetHybridization()
+            atom_features.append(self.HYBRIDIZATION_MAP.get(hyb, 0))
+
+            # 8. Is aromatic
             atom_features.append(1 if atom.GetIsAromatic() else 0)
 
-            #Is in ring
+            # 9. Is in ring
             atom_features.append(1 if atom.IsInRing() else 0)
 
             features.append(atom_features)
