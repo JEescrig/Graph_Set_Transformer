@@ -12,3 +12,8 @@ venv/
 *.sdf
 *.zip
 *.pth
+
+# Processed data files
+data/*/processed/
+results/
+EGNN/
