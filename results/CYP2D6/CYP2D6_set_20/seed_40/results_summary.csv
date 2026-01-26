@@ -1,0 +1,4 @@
+Model,Best Val AUROC,Best Val AUPRC,Test AUROC,Test AUPRC,Final Train Loss
+SetTransformer,1.0,1.0,0.7,0.75,1.0169982829211222e-06
+DeepSets,1.0,1.0,1.0,1.0,4.6014263261895394e-05
+GraphSetConv,1.0,1.0,1.0,1.0,0.000148136168718338
