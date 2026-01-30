@@ -3,12 +3,14 @@ import random
 from collections import defaultdict
 
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader as TorchDataLoader
-from torch_geometric.data import Batch
-from torch_geometric.datasets import TUDataset, MoleculeNet
+
+# from torch.utils.data import Dataset, DataLoader as TorchDataLoader
+
+# from torch_geometric.datasets import TUDataset, MoleculeNet
 from torch_geometric.nn import (
     GCNConv,
     global_mean_pool,
@@ -18,46 +20,21 @@ from torch_geometric.nn import (
 )
 from torch_geometric.utils import scatter
 from torch_geometric.utils import to_dense_batch
-from sklearn.metrics import roc_auc_score
+
+# from sklearn.metrics import roc_auc_score
+
 
 # Wrappers to replace torch_scatter functions
 def scatter_add(src, index, dim=0, dim_size=None):
-    return scatter(src, index, dim=dim, dim_size=dim_size, reduce='sum')
+    return scatter(src, index, dim=dim, dim_size=dim_size, reduce="sum")
+
 
 def scatter_mean(src, index, dim=0, dim_size=None):
-    return scatter(src, index, dim=dim, dim_size=dim_size, reduce='mean')
-
-
-class SetDataset(Dataset):
-    def __init__(self, sets):
-        self.sets = sets
-
-    def __len__(self):
-        return len(self.sets)
-
-    def __getitem__(self, idx):
-        return self.sets[idx]
-
-
-def collate_sets(batch_of_sets):
-    all_graphs = []
-    set_assignments = []
-    labels = []
-
-    for set_idx, (graph_set, label) in enumerate(batch_of_sets):
-        all_graphs.extend(graph_set)
-        set_assignments.extend([set_idx] * len(graph_set))
-        labels.append(label)
-
-    return (
-        Batch.from_data_list(all_graphs),
-        torch.tensor(set_assignments, dtype=torch.long),
-        torch.tensor(labels, dtype=torch.long),
-    )
-
+    return scatter(src, index, dim=dim, dim_size=dim_size, reduce="mean")
 
 
 # Set Transformer (original implimentation and a bit of hackiness to add masking)
+
 
 class MAB(nn.Module):
     def __init__(self, dim_Q, dim_K, dim_V, num_heads, ln=False):
@@ -356,8 +333,8 @@ class GraphSetConv(nn.Module):
         filters,
         in_channels=3,
         activation="relu",
-        mhsa_dropout=0.0,
-        ffn_dropout=0.0,
+        mhsa_dropout=0.1,
+        ffn_dropout=0.2,
         pooling="mean",
         use_gating=True,
         ffn_multiplier=8,
@@ -459,7 +436,7 @@ class GraphSetConv(nn.Module):
         return x_out
 
 
-class SetGraphClassifier(nn.Module):
+class GraphSetTransformerGraphClassifier(nn.Module):
     def __init__(self, in_channels, hidden_dim, num_classes):
         super().__init__()
         self.setconv1 = GraphSetConv(
@@ -483,122 +460,105 @@ class SetGraphClassifier(nn.Module):
         return self.classifier(set_emb)
 
 
-def make_label_homogeneous_sets(dataset, set_size):
-    # Group by label
-    label_groups = defaultdict(list)
-    for data in dataset:
-        label_groups[int(data.y.item())].append(data)
+# def main():
+#     seed = 42
+#     torch.manual_seed(seed)
+#     np.random.seed(seed)
+#     random.seed(seed)
 
-    sets = []
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for label, graphs in label_groups.items():
-        random.shuffle(graphs)
-        for i in range(0, len(graphs), set_size):
-            sets.append((graphs[i : i + set_size], label))
+#     # dataset = TUDataset(root="./data", name="ENZYMES", use_node_attr=True).shuffle()
 
-    random.shuffle(sets)
-    return sets
+#     def transform(data):
+#         data.x = data.x.float()
+#         return data
 
+#     dataset = MoleculeNet(
+#         root="./data", name="BACE", pre_transform=lambda data: transform(data)
+#     )
+#     # dataset = dataset[:10000]
 
-def main():
-    seed = 42
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+#     test_size = int(len(dataset) / 10)
+#     train_dataset, test_dataset = dataset[:test_size], dataset[test_size:]
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     set_size = 10
+#     batch_size = 16
 
-    # dataset = TUDataset(root="./data", name="ENZYMES", use_node_attr=True).shuffle()
+#     train_sets = make_label_homogeneous_sets(train_dataset, set_size)
+#     test_sets = make_label_homogeneous_sets(test_dataset, set_size)
 
-    def transform(data):
-        data.x = data.x.float()
-        return data
+#     train_loader = TorchDataLoader(
+#         SetDataset(train_sets),
+#         batch_size=batch_size,
+#         shuffle=True,
+#         collate_fn=collate_sets,
+#     )
+#     test_loader = TorchDataLoader(
+#         SetDataset(test_sets),
+#         batch_size=batch_size,
+#         shuffle=False,
+#         collate_fn=collate_sets,
+#     )
 
-    dataset = MoleculeNet(
-        root="./data", name="BACE", pre_transform=lambda data: transform(data)
-    )
-    # dataset = dataset[:10000]
+#     model = DeepSetGraphClassifier(
+#         in_channels=dataset.num_node_features,
+#         hidden_dim=64,
+#         num_classes=dataset.num_classes,
+#     ).to(device)
 
-    test_size = int(len(dataset) / 10)
-    train_dataset, test_dataset = dataset[:test_size], dataset[test_size:]
+#     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+#     non_trainable_params = sum(
+#         p.numel() for p in model.parameters() if not p.requires_grad
+#     )
 
-    set_size = 10
-    batch_size = 16
+#     print(f"Trainable parameters: {trainable_params:,}")
+#     print(f"Non-trainable parameters: {non_trainable_params:,}")
+#     print(f"Total parameters: {trainable_params + non_trainable_params:,}")
 
-    train_sets = make_label_homogeneous_sets(train_dataset, set_size)
-    test_sets = make_label_homogeneous_sets(test_dataset, set_size)
+#     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    train_loader = TorchDataLoader(
-        SetDataset(train_sets),
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_sets,
-    )
-    test_loader = TorchDataLoader(
-        SetDataset(test_sets),
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_sets,
-    )
+#     for epoch in range(600):
+#         model.train()
+#         total_loss = 0
 
-    model = DeepSetGraphClassifier(
-        in_channels=dataset.num_node_features,
-        hidden_dim=64,
-        num_classes=dataset.num_classes,
-    ).to(device)
+#         for data, set_batch, targets in train_loader:
+#             data = data.to(device)
+#             set_batch = set_batch.to(device)
+#             targets = targets.to(device)
 
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    non_trainable_params = sum(
-        p.numel() for p in model.parameters() if not p.requires_grad
-    )
+#             optimizer.zero_grad()
+#             pred = model(data, set_batch)
+#             loss = F.cross_entropy(pred, targets)
+#             loss.backward()
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#             optimizer.step()
+#             total_loss += loss.item()
 
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Non-trainable parameters: {non_trainable_params:,}")
-    print(f"Total parameters: {trainable_params + non_trainable_params:,}")
+#         model.eval()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+#         all_probs = []
+#         all_targets = []
 
-    for epoch in range(600):
-        model.train()
-        total_loss = 0
+#         with torch.no_grad():
+#             for data, set_batch, targets in test_loader:
+#                 data = data.to(device)
+#                 set_batch = set_batch.to(device)
+#                 targets = targets.to(device)
 
-        for data, set_batch, targets in train_loader:
-            data = data.to(device)
-            set_batch = set_batch.to(device)
-            targets = targets.to(device)
+#                 logits = model(data, set_batch)  # shape (N, 2)
+#                 probs = F.softmax(logits, dim=1)[:, 1]  # positive class
 
-            optimizer.zero_grad()
-            pred = model(data, set_batch)
-            loss = F.cross_entropy(pred, targets)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            total_loss += loss.item()
+#                 all_probs.append(probs.cpu())
+#                 all_targets.append(targets.cpu())
 
-        model.eval()
+#         all_probs = torch.cat(all_probs).numpy()  # shape (N,)
+#         all_targets = torch.cat(all_targets).numpy()  # shape (N,)
 
-        all_probs = []
-        all_targets = []
+#         auroc = roc_auc_score(all_targets, all_probs)
 
-        with torch.no_grad():
-            for data, set_batch, targets in test_loader:
-                data = data.to(device)
-                set_batch = set_batch.to(device)
-                targets = targets.to(device)
-
-                logits = model(data, set_batch)  # shape (N, 2)
-                probs = F.softmax(logits, dim=1)[:, 1]  # positive class
-
-                all_probs.append(probs.cpu())
-                all_targets.append(targets.cpu())
-
-        all_probs = torch.cat(all_probs).numpy()  # shape (N,)
-        all_targets = torch.cat(all_targets).numpy()  # shape (N,)
-
-        auroc = roc_auc_score(all_targets, all_probs)
-
-        print(f"Epoch {epoch:02d} >> Loss {total_loss:.4f} >> Test AUROC: {auroc:.4f}")
+#         print(f"Epoch {epoch:02d} >> Loss {total_loss:.4f} >> Test AUROC: {auroc:.4f}")
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
