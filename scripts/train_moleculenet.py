@@ -20,6 +20,7 @@ from graph_set_transformer.data import (
     SetDataset,
     collate_sets,
     make_label_homogeneous_sets,
+    make_label_homogeneous_sets_rand_card,
 )
 
 import matplotlib.pyplot as plt
@@ -128,8 +129,8 @@ def main():
     num_classes = 2
 
     # Create sets of graphs with homogeneous labels
-    val_sets = make_label_homogeneous_sets(val_dataset, set_size)
-    test_sets = make_label_homogeneous_sets(test_dataset, set_size)
+    val_sets = make_label_homogeneous_sets(val_dataset, 1)
+    test_sets = make_label_homogeneous_sets(test_dataset, 1)
 
     # Create SetDatasets
     val_set_dataset = SetDataset(val_sets)
@@ -160,7 +161,10 @@ def main():
         best_model_state = None
 
         for epoch in range(num_epochs):
-            train_sets = make_label_homogeneous_sets(train_dataset, set_size)
+            train_sets = make_label_homogeneous_sets_rand_card(
+                train_dataset, max_size=1
+            )
+            # train_sets = make_label_homogeneous_sets(train_dataset, set_size)
             train_set_dataset = SetDataset(train_sets)
             train_loader = TorchDataLoader(
                 train_set_dataset,

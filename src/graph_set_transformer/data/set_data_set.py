@@ -49,3 +49,23 @@ def make_label_homogeneous_sets(dataset, set_size):
 
     random.shuffle(sets)
     return sets
+
+
+def make_label_homogeneous_sets_rand_card(dataset, min_size=1, max_size=10):
+    label_groups = defaultdict(list)
+    for data in dataset:
+        label_groups[int(data.y.item())].append(data)
+
+    sets = []
+    for label, graphs in label_groups.items():
+        random.shuffle(graphs)
+        i = 0
+        while i < len(graphs):
+            remaining = len(graphs) - i
+            current_set_size = random.randint(min_size, min(max_size, remaining))
+
+            sets.append((graphs[i : i + current_set_size], label))
+            i += current_set_size
+
+    random.shuffle(sets)
+    return sets
