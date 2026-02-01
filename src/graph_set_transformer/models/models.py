@@ -3,14 +3,12 @@ import random
 from collections import defaultdict
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# from torch.utils.data import Dataset, DataLoader as TorchDataLoader
-
-# from torch_geometric.datasets import TUDataset, MoleculeNet
+from torch.utils.data import Dataset, DataLoader as TorchDataLoader
+from torch_geometric.data import Batch
+from torch_geometric.datasets import TUDataset, MoleculeNet
 from torch_geometric.nn import (
     GCNConv,
     global_mean_pool,
@@ -18,66 +16,48 @@ from torch_geometric.nn import (
     global_add_pool,
     aggr,
 )
-from torch_geometric.nn.models import GCN
 from torch_geometric.utils import scatter
 from torch_geometric.utils import to_dense_batch
-
-
-# from sklearn.metrics import roc_auc_score
-class GraphSetTransformerGraphClassifier(nn.Module):
-    def __init__(self, in_channels, hidden_dim, num_classes):
-        super().__init__()
-        self.setconv1 = GraphSetConv(
-            filters=hidden_dim, in_channels=in_channels, activation="gelu"
-        )
-        self.setconv2 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
-        )
-        self.setconv3 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
-        )
-
-    def forward(self, data, set_batch):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        x = self.setconv1(x, edge_index, batch, set_batch)
-        x = self.setconv2(x, edge_index, batch, set_batch)
-        x = self.setconv3(x, edge_index, batch, set_batch)
-        graph_emb = global_mean_pool(x, batch)
-        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
-        return self.classifier(set_emb)
-
-
-class GCNClassifier(nn.Module):
-    def __init__(
-        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.2
-    ):
-        super().__init__()
-
-        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
-
-        self.classifier = nn.Linear(hidden_dim, num_classes)
-
-    def forward(self, data, set_batch):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-
-        x = self.gcn(x, edge_index)
-
-        graph_emb = global_mean_pool(x, batch)
-
-        return self.classifier(graph_emb)
-
+from sklearn.metrics import roc_auc_score
 
 # Wrappers to replace torch_scatter functions
 def scatter_add(src, index, dim=0, dim_size=None):
-    return scatter(src, index, dim=dim, dim_size=dim_size, reduce="sum")
-
+    return scatter(src, index, dim=dim, dim_size=dim_size, reduce='sum')
 
 def scatter_mean(src, index, dim=0, dim_size=None):
-    return scatter(src, index, dim=dim, dim_size=dim_size, reduce="mean")
+    return scatter(src, index, dim=dim, dim_size=dim_size, reduce='mean')
+
+
+class SetDataset(Dataset):
+    def __init__(self, sets):
+        self.sets = sets
+
+    def __len__(self):
+        return len(self.sets)
+
+    def __getitem__(self, idx):
+        return self.sets[idx]
+
+
+def collate_sets(batch_of_sets):
+    all_graphs = []
+    set_assignments = []
+    labels = []
+
+    for set_idx, (graph_set, label) in enumerate(batch_of_sets):
+        all_graphs.extend(graph_set)
+        set_assignments.extend([set_idx] * len(graph_set))
+        labels.append(label)
+
+    return (
+        Batch.from_data_list(all_graphs),
+        torch.tensor(set_assignments, dtype=torch.long),
+        torch.tensor(labels, dtype=torch.long),
+    )
+
 
 
 # Set Transformer (original implimentation and a bit of hackiness to add masking)
-
 
 class MAB(nn.Module):
     def __init__(self, dim_Q, dim_K, dim_V, num_heads, ln=False):
@@ -201,17 +181,27 @@ class SetTransformer(nn.Module):
 
 class SetTransformerGraphClassifier(nn.Module):
     def __init__(
-        self, in_channels, hidden_dim, num_classes, num_heads=4, num_sabs=2, dropout=0.2
+        self, in_channels, hidden_dim, num_classes, num_heads=4, num_sabs=2, dropout=0.1
     ):
         super().__init__()
 
-        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)  # Add dropout layer
+
         self.set_transformer = SetTransformer(hidden_dim, 1, hidden_dim)
+
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data, set_batch):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        x = self.gcn(x, edge_index)
+
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)  # Apply dropout
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)  # Apply dropout
 
         graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden_dim]
 
@@ -246,7 +236,7 @@ class SetTransformerGraphClassifier(nn.Module):
         positions = torch.empty_like(positions_sorted)
         positions[sorted_indices] = positions_sorted
 
-        # Padding ...
+        # Padding 
         z_padded = torch.zeros(num_sets, max_set_size, hidden_dim, device=device)
         z_padded[set_batch, positions] = graph_emb
 
@@ -257,13 +247,11 @@ class SetTransformerGraphClassifier(nn.Module):
 
         return z_padded, key_padding_mask
 
-
-#
 # DeepSets (adapted from the barebones original implementation)
-#
+
 class DeepSets(nn.Module):
     def __init__(
-        self, input_dim, hidden_dim, output_dim, aggregator="sum", dropout=0.2
+        self, input_dim, hidden_dim, output_dim, aggregator="sum", dropout=0.0
     ):
         super().__init__()
         self.psi = nn.Sequential(
@@ -300,11 +288,15 @@ class DeepSets(nn.Module):
 
 class DeepSetGraphClassifier(nn.Module):
     def __init__(
-        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.2
+        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.1
     ):
         super().__init__()
 
-        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)  # Add dropout layer
 
         self.deepsets = DeepSets(
             input_dim=hidden_dim,
@@ -317,7 +309,12 @@ class DeepSetGraphClassifier(nn.Module):
     def forward(self, data, set_batch):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
-        x = self.gcn(x, edge_index)
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)  # Apply dropout
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)  # Apply dropout
+        x = self.act(self.conv3(x, edge_index))
+        x = self.dropout(x)  # Apply dropout
 
         graph_emb = global_mean_pool(x, batch)
         x_padded = self._pad_to_sets(graph_emb, set_batch)
@@ -355,35 +352,17 @@ class DeepSetGraphClassifier(nn.Module):
         return x_padded
 
 
-#
+
 # Graph set convolution (ours)
-#
-
-
-class GatedFusion(nn.Module):
-    def __init__(self, dim, init_tau=1.0):
-        super().__init__()
-        self.log_tau = nn.Parameter(torch.log(torch.tensor(init_tau)))
-        self.linear = nn.Linear(dim * 2, dim)
-
-        self.dropout = nn.Dropout(0.1)
-
-    def forward(self, x, set_info):
-        tau = torch.exp(self.log_tau).clamp(min=0.5, max=5.0)
-        g = self.dropout(self.linear(torch.cat([x, set_info], dim=-1)))
-        gate = torch.sigmoid(g / tau)
-        return gate * set_info + (1 - gate) * x
-
 
 class GraphSetConv(nn.Module):
     def __init__(
         self,
         filters,
-        in_channels,
+        in_channels=3,
         activation="relu",
-        mhsa_dropout=0.2,
-        ffn_dropout=0.2,
-        gcn_dropout=0.2,
+        mhsa_dropout=0.0,
+        ffn_dropout=0.0,
         pooling="mean",
         use_gating=True,
         ffn_multiplier=8,
@@ -395,10 +374,10 @@ class GraphSetConv(nn.Module):
         self.pooling = pooling
         self.use_gating = use_gating
 
-        self.gcn_layer = GCNConv(in_channels, filters)
+        self.gcn_layer = GCNConv(in_channels, filters, improved=True)
 
         self.gcn_norms = nn.BatchNorm1d(filters)
-        self.gcn_dropout = nn.Dropout(gcn_dropout)
+        self.gcn_dropout = nn.Dropout(ffn_dropout)
 
         if num_heads == 0:
             num_heads = max(1, filters // 16)
@@ -410,8 +389,6 @@ class GraphSetConv(nn.Module):
             dropout=mhsa_dropout,
             batch_first=True,
         )
-        # self.mha_dropout = nn.Dropout(mhsa_dropout)
-
         self.ln_post_attn = nn.LayerNorm(filters)
 
         self.ffn = nn.Sequential(
@@ -423,11 +400,8 @@ class GraphSetConv(nn.Module):
         )
         self.ln_post_ffn = nn.LayerNorm(filters)
 
-        # if use_gating:
-        #     self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
-
         if use_gating:
-            self.gate = GatedFusion(dim=filters, init_tau=2.0)
+            self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
 
         self.act = self._build_activation(activation)
 
@@ -471,7 +445,6 @@ class GraphSetConv(nn.Module):
         z_norm = self.ln_pre(z_dense)
 
         z_attn, attn_weights = self.mha(z_norm, z_norm, z_norm, key_padding_mask=~mask)
-        # z_attn = self.mha_dropout(z_attn)
         z_dense = self.ln_post_attn(z_dense + z_attn)
 
         z_ffn = self.ffn(z_dense)
@@ -482,141 +455,218 @@ class GraphSetConv(nn.Module):
         set_info = z_out[batch]
 
         if self.use_gating:
-            # gate_input = torch.cat([x, set_info], dim=-1)
-            # gate_values = self.gate(gate_input)
-            # x_out = gate_values * set_info + (1 - gate_values) * x
-            x_out = self.gate(x, set_info)
+            gate_input = torch.cat([x, set_info], dim=-1)
+            gate_values = self.gate(gate_input)
+            x_out = gate_values * set_info + (1 - gate_values) * x
         else:
             x_out = x + set_info
 
         return x_out
 
 
-class GraphSetTransformerGraphClassifier(nn.Module):
+class SetGraphClassifier(nn.Module):
     def __init__(self, in_channels, hidden_dim, num_classes, dropout=0.1):
         super().__init__()
         self.setconv1 = GraphSetConv(
-            filters=hidden_dim, in_channels=in_channels, activation="gelu"
+            filters=hidden_dim, 
+            in_channels=in_channels, 
+            activation="relu",
+            mhsa_dropout=dropout,  
+            ffn_dropout=dropout    
         )
         self.setconv2 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+            filters=hidden_dim, 
+            in_channels=hidden_dim, 
+            activation="relu",
+            mhsa_dropout=dropout,
+            ffn_dropout=dropout
         )
         self.setconv3 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+            filters=hidden_dim, 
+            in_channels=hidden_dim, 
+            activation="relu",
+            mhsa_dropout=dropout,
+            ffn_dropout=dropout
         )
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout)  # External dropout between layers (matches other models)
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data, set_batch):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         x = self.setconv1(x, edge_index, batch, set_batch)
+        x = self.dropout(x)  # Apply dropout
         x = self.setconv2(x, edge_index, batch, set_batch)
+        x = self.dropout(x)  # Apply dropout
         x = self.setconv3(x, edge_index, batch, set_batch)
+        x = self.dropout(x)  # Apply dropout
         graph_emb = global_mean_pool(x, batch)
-        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
-        set_emb = self.dropout(set_emb)
+        set_emb = scatter_add(graph_emb, set_batch, dim=0)
         return self.classifier(set_emb)
 
 
-# def main():
-#     seed = 42
-#     torch.manual_seed(seed)
-#     np.random.seed(seed)
-#     random.seed(seed)
-
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-#     # dataset = TUDataset(root="./data", name="ENZYMES", use_node_attr=True).shuffle()
-
-#     def transform(data):
-#         data.x = data.x.float()
-#         return data
-
-#     dataset = MoleculeNet(
-#         root="./data", name="BACE", pre_transform=lambda data: transform(data)
-#     )
-#     # dataset = dataset[:10000]
-
-#     test_size = int(len(dataset) / 10)
-#     train_dataset, test_dataset = dataset[:test_size], dataset[test_size:]
-
-#     set_size = 10
-#     batch_size = 16
-
-#     train_sets = make_label_homogeneous_sets(train_dataset, set_size)
-#     test_sets = make_label_homogeneous_sets(test_dataset, set_size)
-
-#     train_loader = TorchDataLoader(
-#         SetDataset(train_sets),
-#         batch_size=batch_size,
-#         shuffle=True,
-#         collate_fn=collate_sets,
-#     )
-#     test_loader = TorchDataLoader(
-#         SetDataset(test_sets),
-#         batch_size=batch_size,
-#         shuffle=False,
-#         collate_fn=collate_sets,
-#     )
-
-#     model = DeepSetGraphClassifier(
-#         in_channels=dataset.num_node_features,
-#         hidden_dim=64,
-#         num_classes=dataset.num_classes,
-#     ).to(device)
-
-#     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-#     non_trainable_params = sum(
-#         p.numel() for p in model.parameters() if not p.requires_grad
-#     )
-
-#     print(f"Trainable parameters: {trainable_params:,}")
-#     print(f"Non-trainable parameters: {non_trainable_params:,}")
-#     print(f"Total parameters: {trainable_params + non_trainable_params:,}")
-
-#     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-#     for epoch in range(600):
-#         model.train()
-#         total_loss = 0
-
-#         for data, set_batch, targets in train_loader:
-#             data = data.to(device)
-#             set_batch = set_batch.to(device)
-#             targets = targets.to(device)
-
-#             optimizer.zero_grad()
-#             pred = model(data, set_batch)
-#             loss = F.cross_entropy(pred, targets)
-#             loss.backward()
-#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-#             optimizer.step()
-#             total_loss += loss.item()
-
-#         model.eval()
-
-#         all_probs = []
-#         all_targets = []
-
-#         with torch.no_grad():
-#             for data, set_batch, targets in test_loader:
-#                 data = data.to(device)
-#                 set_batch = set_batch.to(device)
-#                 targets = targets.to(device)
-
-#                 logits = model(data, set_batch)  # shape (N, 2)
-#                 probs = F.softmax(logits, dim=1)[:, 1]  # positive class
-
-#                 all_probs.append(probs.cpu())
-#                 all_targets.append(targets.cpu())
-
-#         all_probs = torch.cat(all_probs).numpy()  # shape (N,)
-#         all_targets = torch.cat(all_targets).numpy()  # shape (N,)
-
-#         auroc = roc_auc_score(all_targets, all_probs)
-
-#         print(f"Epoch {epoch:02d} >> Loss {total_loss:.4f} >> Test AUROC: {auroc:.4f}")
+class GCNGraphClassifier(nn.Module):
+    """Simple GCN baseline - classifies graphs individually without set-level aggregation.
+    
+    Uses the same GCN encoder architecture as SetTransformer and DeepSets models,
+    but predicts directly from graph embeddings. When used with sets, it averages
+    the predictions of all graphs in the set.
+    """
+    def __init__(self, in_channels, hidden_dim, num_classes, dropout=0.1):
+        super().__init__()
+        
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        
+        self.classifier = nn.Linear(hidden_dim, num_classes)
+    
+    def forward(self, data, set_batch):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        
+        # GCN encoder (same as SetTransformer/DeepSets)
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv3(x, edge_index))
+        x = self.dropout(x)
+        
+        # Graph-level embedding
+        graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden_dim]
+        
+        # Get per-graph logits
+        graph_logits = self.classifier(graph_emb)  # [num_graphs, num_classes]
+        
+        # Average logits within each set to get set-level prediction
+        set_logits = scatter_mean(graph_logits, set_batch, dim=0)
+        
+        return set_logits
 
 
-# if __name__ == "__main__":
-#     main()
+def make_label_homogeneous_sets(dataset, set_size):
+    # Group by label
+    label_groups = defaultdict(list)
+    for data in dataset:
+        # Handle both single-label and multi-label datasets
+        if data.y.numel() == 1:
+            label = int(data.y.item())
+        else:
+            # For multi-task datasets, use the first task
+            label = int(data.y[0].item())
+        label_groups[label].append(data)
+
+    sets = []
+
+    for label, graphs in label_groups.items():
+        random.shuffle(graphs)
+        for i in range(0, len(graphs), set_size):
+            sets.append((graphs[i : i + set_size], label))
+
+    random.shuffle(sets)
+    return sets
+
+
+def main():
+    seed = 42
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # dataset = TUDataset(root="./data", name="ENZYMES", use_node_attr=True).shuffle()
+
+    def transform(data):
+        data.x = data.x.float()
+        return data
+
+    dataset = MoleculeNet(
+        root="./data", name="BACE", pre_transform=lambda data: transform(data)
+    )
+    # dataset = dataset[:10000]
+
+    test_size = int(len(dataset) / 10)
+    train_dataset, test_dataset = dataset[:test_size], dataset[test_size:]
+
+    set_size = 10
+    batch_size = 16
+
+    train_sets = make_label_homogeneous_sets(train_dataset, set_size)
+    test_sets = make_label_homogeneous_sets(test_dataset, set_size)
+
+    train_loader = TorchDataLoader(
+        SetDataset(train_sets),
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate_sets,
+    )
+    test_loader = TorchDataLoader(
+        SetDataset(test_sets),
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_sets,
+    )
+
+    model = DeepSetGraphClassifier(
+        in_channels=dataset.num_node_features,
+        hidden_dim=64,
+        num_classes=dataset.num_classes,
+    ).to(device)
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    non_trainable_params = sum(
+        p.numel() for p in model.parameters() if not p.requires_grad
+    )
+
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Non-trainable parameters: {non_trainable_params:,}")
+    print(f"Total parameters: {trainable_params + non_trainable_params:,}")
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    for epoch in range(600):
+        model.train()
+        total_loss = 0
+
+        for data, set_batch, targets in train_loader:
+            data = data.to(device)
+            set_batch = set_batch.to(device)
+            targets = targets.to(device)
+
+            optimizer.zero_grad()
+            pred = model(data, set_batch)
+            loss = F.cross_entropy(pred, targets)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_loss += loss.item()
+
+        model.eval()
+
+        all_probs = []
+        all_targets = []
+
+        with torch.no_grad():
+            for data, set_batch, targets in test_loader:
+                data = data.to(device)
+                set_batch = set_batch.to(device)
+                targets = targets.to(device)
+
+                logits = model(data, set_batch)  # shape (N, 2)
+                probs = F.softmax(logits, dim=1)[:, 1]  # positive class
+
+                all_probs.append(probs.cpu())
+                all_targets.append(targets.cpu())
+
+        all_probs = torch.cat(all_probs).numpy()  # shape (N,)
+        all_targets = torch.cat(all_targets).numpy()  # shape (N,)
+
+        auroc = roc_auc_score(all_targets, all_probs)
+
+        print(f"Epoch {epoch:02d} >> Loss {total_loss:.4f} >> Test AUROC: {auroc:.4f}")
+
+
+if __name__ == "__main__":
+    main()
