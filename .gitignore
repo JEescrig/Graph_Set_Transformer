@@ -231,5 +231,4 @@ venv/
 
 # Processed data files
 data/*/processed/
-results/
 EGNN/
