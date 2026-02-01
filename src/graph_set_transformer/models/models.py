@@ -18,10 +18,53 @@ from torch_geometric.nn import (
     global_add_pool,
     aggr,
 )
+from torch_geometric.nn.models import GCN
 from torch_geometric.utils import scatter
 from torch_geometric.utils import to_dense_batch
 
+
 # from sklearn.metrics import roc_auc_score
+class GraphSetTransformerGraphClassifier(nn.Module):
+    def __init__(self, in_channels, hidden_dim, num_classes):
+        super().__init__()
+        self.setconv1 = GraphSetConv(
+            filters=hidden_dim, in_channels=in_channels, activation="gelu"
+        )
+        self.setconv2 = GraphSetConv(
+            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+        )
+        self.setconv3 = GraphSetConv(
+            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+        )
+
+    def forward(self, data, set_batch):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = self.setconv1(x, edge_index, batch, set_batch)
+        x = self.setconv2(x, edge_index, batch, set_batch)
+        x = self.setconv3(x, edge_index, batch, set_batch)
+        graph_emb = global_mean_pool(x, batch)
+        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
+        return self.classifier(set_emb)
+
+
+class GCNClassifier(nn.Module):
+    def __init__(
+        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.2
+    ):
+        super().__init__()
+
+        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
+
+        self.classifier = nn.Linear(hidden_dim, num_classes)
+
+    def forward(self, data, set_batch):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        x = self.gcn(x, edge_index)
+
+        graph_emb = global_mean_pool(x, batch)
+
+        return self.classifier(graph_emb)
 
 
 # Wrappers to replace torch_scatter functions
@@ -158,24 +201,17 @@ class SetTransformer(nn.Module):
 
 class SetTransformerGraphClassifier(nn.Module):
     def __init__(
-        self, in_channels, hidden_dim, num_classes, num_heads=4, num_sabs=2, dropout=0.1
+        self, in_channels, hidden_dim, num_classes, num_heads=4, num_sabs=2, dropout=0.2
     ):
         super().__init__()
 
-        self.conv1 = GCNConv(in_channels, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.conv3 = GCNConv(hidden_dim, hidden_dim)
-        self.act = nn.ReLU()
-
+        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
         self.set_transformer = SetTransformer(hidden_dim, 1, hidden_dim)
-
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data, set_batch):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-
-        x = self.act(self.conv1(x, edge_index))
-        x = self.act(self.conv2(x, edge_index))
+        x = self.gcn(x, edge_index)
 
         graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden_dim]
 
@@ -227,7 +263,7 @@ class SetTransformerGraphClassifier(nn.Module):
 #
 class DeepSets(nn.Module):
     def __init__(
-        self, input_dim, hidden_dim, output_dim, aggregator="sum", dropout=0.0
+        self, input_dim, hidden_dim, output_dim, aggregator="sum", dropout=0.2
     ):
         super().__init__()
         self.psi = nn.Sequential(
@@ -264,14 +300,11 @@ class DeepSets(nn.Module):
 
 class DeepSetGraphClassifier(nn.Module):
     def __init__(
-        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.1
+        self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.2
     ):
         super().__init__()
 
-        self.conv1 = GCNConv(in_channels, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.conv3 = GCNConv(hidden_dim, hidden_dim)
-        self.act = nn.ReLU()
+        self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
 
         self.deepsets = DeepSets(
             input_dim=hidden_dim,
@@ -284,9 +317,7 @@ class DeepSetGraphClassifier(nn.Module):
     def forward(self, data, set_batch):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
-        x = self.act(self.conv1(x, edge_index))
-        x = self.act(self.conv2(x, edge_index))
-        x = self.act(self.conv3(x, edge_index))
+        x = self.gcn(x, edge_index)
 
         graph_emb = global_mean_pool(x, batch)
         x_padded = self._pad_to_sets(graph_emb, set_batch)
@@ -327,14 +358,32 @@ class DeepSetGraphClassifier(nn.Module):
 #
 # Graph set convolution (ours)
 #
+
+
+class GatedFusion(nn.Module):
+    def __init__(self, dim, init_tau=1.0):
+        super().__init__()
+        self.log_tau = nn.Parameter(torch.log(torch.tensor(init_tau)))
+        self.linear = nn.Linear(dim * 2, dim)
+
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x, set_info):
+        tau = torch.exp(self.log_tau).clamp(min=0.5, max=5.0)
+        g = self.dropout(self.linear(torch.cat([x, set_info], dim=-1)))
+        gate = torch.sigmoid(g / tau)
+        return gate * set_info + (1 - gate) * x
+
+
 class GraphSetConv(nn.Module):
     def __init__(
         self,
         filters,
-        in_channels=3,
+        in_channels,
         activation="relu",
-        mhsa_dropout=0.1,
+        mhsa_dropout=0.2,
         ffn_dropout=0.2,
+        gcn_dropout=0.2,
         pooling="mean",
         use_gating=True,
         ffn_multiplier=8,
@@ -346,10 +395,10 @@ class GraphSetConv(nn.Module):
         self.pooling = pooling
         self.use_gating = use_gating
 
-        self.gcn_layer = GCNConv(in_channels, filters, improved=True)
+        self.gcn_layer = GCNConv(in_channels, filters)
 
         self.gcn_norms = nn.BatchNorm1d(filters)
-        self.gcn_dropout = nn.Dropout(ffn_dropout)
+        self.gcn_dropout = nn.Dropout(gcn_dropout)
 
         if num_heads == 0:
             num_heads = max(1, filters // 16)
@@ -361,6 +410,8 @@ class GraphSetConv(nn.Module):
             dropout=mhsa_dropout,
             batch_first=True,
         )
+        # self.mha_dropout = nn.Dropout(mhsa_dropout)
+
         self.ln_post_attn = nn.LayerNorm(filters)
 
         self.ffn = nn.Sequential(
@@ -372,8 +423,11 @@ class GraphSetConv(nn.Module):
         )
         self.ln_post_ffn = nn.LayerNorm(filters)
 
+        # if use_gating:
+        #     self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
+
         if use_gating:
-            self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
+            self.gate = GatedFusion(dim=filters, init_tau=2.0)
 
         self.act = self._build_activation(activation)
 
@@ -417,6 +471,7 @@ class GraphSetConv(nn.Module):
         z_norm = self.ln_pre(z_dense)
 
         z_attn, attn_weights = self.mha(z_norm, z_norm, z_norm, key_padding_mask=~mask)
+        # z_attn = self.mha_dropout(z_attn)
         z_dense = self.ln_post_attn(z_dense + z_attn)
 
         z_ffn = self.ffn(z_dense)
@@ -427,9 +482,10 @@ class GraphSetConv(nn.Module):
         set_info = z_out[batch]
 
         if self.use_gating:
-            gate_input = torch.cat([x, set_info], dim=-1)
-            gate_values = self.gate(gate_input)
-            x_out = gate_values * set_info + (1 - gate_values) * x
+            # gate_input = torch.cat([x, set_info], dim=-1)
+            # gate_values = self.gate(gate_input)
+            # x_out = gate_values * set_info + (1 - gate_values) * x
+            x_out = self.gate(x, set_info)
         else:
             x_out = x + set_info
 
@@ -437,7 +493,7 @@ class GraphSetConv(nn.Module):
 
 
 class GraphSetTransformerGraphClassifier(nn.Module):
-    def __init__(self, in_channels, hidden_dim, num_classes):
+    def __init__(self, in_channels, hidden_dim, num_classes, dropout=0.1):
         super().__init__()
         self.setconv1 = GraphSetConv(
             filters=hidden_dim, in_channels=in_channels, activation="gelu"
@@ -448,6 +504,7 @@ class GraphSetTransformerGraphClassifier(nn.Module):
         self.setconv3 = GraphSetConv(
             filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
         )
+        self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data, set_batch):
@@ -457,6 +514,7 @@ class GraphSetTransformerGraphClassifier(nn.Module):
         x = self.setconv3(x, edge_index, batch, set_batch)
         graph_emb = global_mean_pool(x, batch)
         set_emb = scatter_mean(graph_emb, set_batch, dim=0)
+        set_emb = self.dropout(set_emb)
         return self.classifier(set_emb)
 
 
