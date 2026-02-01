@@ -10,7 +10,7 @@ from torch_geometric.datasets import GNNBenchmarkDataset
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, average_precision_score
 from pathlib import Path
 
-from models import (SetTransformerGraphClassifier,
+from src.graph_set_transformer.models.model_dropout import (SetTransformerGraphClassifier,
                     DeepSetGraphClassifier,
                     SetGraphClassifier,
                     SetDataset,

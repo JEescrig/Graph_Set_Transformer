@@ -7,36 +7,54 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import pickle
+import sys
+import os
+from collections import defaultdict
 from torch.utils.data import DataLoader as TorchDataLoader
 from sklearn.metrics import accuracy_score, f1_score
+from pathlib import Path
 
-from models import (SetTransformerGraphClassifier,
-                    DeepSetGraphClassifier,
-                    SetGraphClassifier,
-                    SetDataset,
-                    collate_sets)
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.graph_set_transformer.models.models import (
+    SetTransformerGraphClassifier,
+    DeepSetGraphClassifier,
+    SetGraphClassifier,
+    GCNGraphClassifier,
+)
+from src.graph_set_transformer.data.set_data_set import (
+    SetDataset,
+    collate_sets,
+)
+from src.graph_set_transformer.utils.graph_encoder import GraphEncoder
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 
-def get_model(model_name, in_channels, hidden_dim, num_classes):
+def get_model(model_name, in_channels, hidden_dim, num_classes, dropout=0.1):
+    """Get model by name."""
     if model_name == 'SetTransformer':
-        return SetTransformerGraphClassifier(in_channels, hidden_dim, num_classes)
+        return SetTransformerGraphClassifier(in_channels, hidden_dim, num_classes, dropout=dropout)
     elif model_name == 'DeepSets':
-        return DeepSetGraphClassifier(in_channels, hidden_dim, num_classes)
+        return DeepSetGraphClassifier(in_channels, hidden_dim, num_classes, dropout=dropout)
     elif model_name == 'GraphSetConv':
-        return SetGraphClassifier(in_channels, hidden_dim, num_classes)
+        return SetGraphClassifier(in_channels, hidden_dim, num_classes, dropout=dropout)
+    elif model_name == 'GCN':
+        return GCNGraphClassifier(in_channels, hidden_dim, num_classes, dropout=dropout)
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
 
 
-def load_drug_drug(data_dir='/home/josee/Documents/JoseE/Tests/Data/Drug_Drug'):
+def load_drug_drug_from_graphs(data_dir):
     """
-    Load Drug-Drug Interaction dataset.
-    Returns train, val, test lists of (drug_pair_graphs, label) tuples.
+    Load Drug-Drug Interaction dataset from preprocessed graph files.
+    Returns train, val, test lists of (drug_pair_graphs, label).
     """
-    
     def load_split(filename):
-        with open(f'{data_dir}/{filename}', 'rb') as f:
+        filepath = Path(data_dir) / filename
+        with open(filepath, 'rb') as f:
             data = pickle.load(f)
         
         sets = []
@@ -44,6 +62,7 @@ def load_drug_drug(data_dir='/home/josee/Documents/JoseE/Tests/Data/Drug_Drug'):
             # Combine both drugs as a set (drug1 + drug2)
             drug_pair = interaction['reactants'] + interaction['products']
             label = int(interaction['yield'])  # Class label
+            # Ensure float features
             for g in drug_pair:
                 g.x = g.x.float()
             sets.append((drug_pair, label))
@@ -56,7 +75,50 @@ def load_drug_drug(data_dir='/home/josee/Documents/JoseE/Tests/Data/Drug_Drug'):
     return train_sets, val_sets, test_sets
 
 
+def load_drug_drug_from_smiles(data_dir):
+    """
+    Load Drug-Drug Interaction dataset from raw SMILES files.
+    Uses GraphEncoder to convert SMILES to graphs.
+    Returns train, val, test lists of (drug_pair_graphs, label).
+    """
+    encoder = GraphEncoder(fix_seed=True)
+    
+    def load_split(filename):
+        filepath = Path(data_dir) / filename
+        with open(filepath, 'rb') as f:
+            df = pickle.load(f)
+        
+        sets = []
+        for idx, row in df.iterrows():
+            drug1_smiles = row['Drug1']
+            drug2_smiles = row['Drug2']
+            label = int(row['Y'])
+            
+            # Convert SMILES to graphs using GraphEncoder
+            g1_nx = encoder.smiles_to_nx(drug1_smiles)
+            g2_nx = encoder.smiles_to_nx(drug2_smiles)
+            
+            if g1_nx is not None and g2_nx is not None:
+                g1 = encoder.nx_to_pyg(g1_nx)
+                g2 = encoder.nx_to_pyg(g2_nx)
+                
+                if g1 is not None and g2 is not None:
+                    g1.x = g1.x.float()
+                    g2.x = g2.x.float()
+                    drug_pair = [g1, g2]
+                    sets.append((drug_pair, label))
+        
+        return sets
+    
+    train_sets = load_split('train_reactions.pkl')
+    val_sets = load_split('valid_reactions.pkl')
+    test_sets = load_split('test_reactions.pkl')
+    
+    return train_sets, val_sets, test_sets
+
+
 def train_epoch(model, loader, optimizer, device):
+    """Train for one epoch."""
     model.train()
     total_loss = 0
     for data, set_batch, targets in loader:
@@ -75,6 +137,7 @@ def train_epoch(model, loader, optimizer, device):
 
 
 def evaluate(model, loader, device):
+    """Evaluate model on loader."""
     model.eval()
     all_preds, all_targets = [], []
     with torch.no_grad():
@@ -92,23 +155,39 @@ def evaluate(model, loader, device):
 
 
 def main():
-    # Force CPU - RTX 5090 (sm_120) requires PyTorch nightly with CUDA 12.8+
-    device = torch.device('cuda')
+    # Configuration
+    data_dir = Path(__file__).parent.parent / 'data' / 'Drug_Drug'
+    output_dir = Path(__file__).parent.parent / 'results' / 'Drug_Drug'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Parameters
+    # Training parameters
     model_names = ['SetTransformer', 'DeepSets', 'GraphSetConv']
-    num_epochs = 50  # Fewer epochs for larger dataset
+    num_epochs = 100
     hidden_dim = 64
     batch_size = 64
     learning_rate = 1e-3
+    dropout = 0.1
+    seeds = [10, 20, 30, 40, 50]
 
-    all_results = {name: {'train_loss': [], 'val_acc': [], 'val_f1': []} 
-                   for name in model_names}
+    print(f"\n{'#'*70}")
+    print("Drug-Drug Interaction Classification")
+    print(f"Models: {model_names}")
+    print(f"Seeds: {seeds}")
+    print(f"{'#'*70}\n")
 
-    # Load Drug-Drug dataset
+    # Try to load preprocessed graphs first, fall back to SMILES
     print("Loading Drug-Drug Interaction dataset...")
-    train_sets, val_sets, test_sets = load_drug_drug()
+    try:
+        train_sets, val_sets, test_sets = load_drug_drug_from_graphs(data_dir)
+        print("Loaded from preprocessed graph files")
+    except FileNotFoundError:
+        print("Graph files not found, converting from SMILES...")
+        train_sets, val_sets, test_sets = load_drug_drug_from_smiles(data_dir)
+        print("Converted SMILES to graphs using GraphEncoder")
+    
     print(f"Train: {len(train_sets)}, Val: {len(val_sets)}, Test: {len(test_sets)}")
 
     # Get input dimensions and number of classes
@@ -117,93 +196,159 @@ def main():
     num_classes = max(all_labels) + 1
     print(f"Input channels: {in_channels}, Num classes: {num_classes}")
 
-    # Create DataLoaders
-    train_loader = TorchDataLoader(
-        SetDataset(train_sets), 
-        batch_size=batch_size, 
-        shuffle=True, 
-        collate_fn=collate_sets
-    )
-    val_loader = TorchDataLoader(
-        SetDataset(val_sets), 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=collate_sets
-    )
-    test_loader = TorchDataLoader(
-        SetDataset(test_sets), 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=collate_sets
-    )
-
-    # Train each model
-    for model_name in model_names:
-        print(f"\n{'='*50}")
-        print(f"Training {model_name}")
-        print(f"{'='*50}")
+    # Storage for aggregated results
+    all_seed_results = defaultdict(lambda: defaultdict(list))
+    
+    for seed_idx, seed in enumerate(seeds):
+        print(f"\n{'='*70}")
+        print(f"Seed {seed} ({seed_idx + 1}/{len(seeds)})")
+        print(f"{'='*70}")
         
-        model = get_model(model_name, in_channels, hidden_dim, num_classes)
-        model = model.to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        # Set seeds
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        
+        # Shuffle sets for this seed
+        random.shuffle(train_sets)
+        
+        # Create DataLoaders
+        train_loader = TorchDataLoader(
+            SetDataset(train_sets), 
+            batch_size=batch_size, 
+            shuffle=True, 
+            collate_fn=collate_sets
+        )
+        val_loader = TorchDataLoader(
+            SetDataset(val_sets), 
+            batch_size=batch_size, 
+            shuffle=False, 
+            collate_fn=collate_sets
+        )
+        test_loader = TorchDataLoader(
+            SetDataset(test_sets), 
+            batch_size=batch_size, 
+            shuffle=False, 
+            collate_fn=collate_sets
+        )
 
-        best_val_acc = 0
-        for epoch in range(num_epochs):
-            train_loss = train_epoch(model, train_loader, optimizer, device)
-            val_acc, val_f1 = evaluate(model, val_loader, device)
+        all_results = {name: {'train_loss': [], 'val_acc': [], 'val_f1': [], 
+                              'test_acc': None, 'test_f1': None, 'best_model': None} 
+                       for name in model_names}
 
-            all_results[model_name]['train_loss'].append(train_loss)
-            all_results[model_name]['val_acc'].append(val_acc)
-            all_results[model_name]['val_f1'].append(val_f1)
+        # Train each model
+        for model_name in model_names:
+            print(f"\n{'='*50}")
+            print(f"Training {model_name} (Seed {seed})")
+            print(f"{'='*50}")
+            
+            model = get_model(model_name, in_channels, hidden_dim, num_classes, dropout=dropout)
+            model = model.to(device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-5)
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            best_val_acc = 0
+            best_val_f1 = 0
+            for epoch in range(num_epochs):
+                train_loss = train_epoch(model, train_loader, optimizer, device)
+                scheduler.step()
+                val_acc, val_f1 = evaluate(model, val_loader, device)
 
-            if (epoch + 1) % 5 == 0:
-                print(f"Epoch {epoch+1}/{num_epochs} - Loss: {train_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
+                all_results[model_name]['train_loss'].append(train_loss)
+                all_results[model_name]['val_acc'].append(val_acc)
+                all_results[model_name]['val_f1'].append(val_f1)
 
-        # Test evaluation
-        test_acc, test_f1 = evaluate(model, test_loader, device)
-        print(f"Best Val Accuracy for {model_name}: {best_val_acc:.4f}")
-        print(f"Test Accuracy: {test_acc:.4f}, Test F1: {test_f1:.4f}")
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_val_f1 = val_f1
+                    all_results[model_name]['best_model'] = model.state_dict().copy()
 
-    # Plots
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+                if (epoch + 1) % 10 == 0:
+                    print(f"  Epoch {epoch+1}/{num_epochs} - Loss: {train_loss:.4f}, Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}")
 
-    for model_name in model_names:
-        axes[0].plot(all_results[model_name]['train_loss'], label=model_name)
-        axes[1].plot(all_results[model_name]['val_acc'], label=model_name)
-        axes[2].plot(all_results[model_name]['val_f1'], label=model_name)
+            # Test evaluation with best model
+            model.load_state_dict(all_results[model_name]['best_model'])
+            test_acc, test_f1 = evaluate(model, test_loader, device)
+            all_results[model_name]['test_acc'] = test_acc
+            all_results[model_name]['test_f1'] = test_f1
+            
+            print(f"Best Val Acc: {best_val_acc:.4f}, Val F1: {best_val_f1:.4f}")
+            print(f"Test Acc: {test_acc:.4f}, Test F1: {test_f1:.4f}")
+            
+            # Store for aggregation
+            all_seed_results[model_name]['val_acc'].append(best_val_acc)
+            all_seed_results[model_name]['val_f1'].append(best_val_f1)
+            all_seed_results[model_name]['test_acc'].append(test_acc)
+            all_seed_results[model_name]['test_f1'].append(test_f1)
 
-    axes[0].set_title('Train Loss (Cross-Entropy)')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Loss')
-    axes[0].legend()
+        # Save plots for this seed
+        seed_output_dir = output_dir / f"seed_{seed}"
+        seed_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    axes[1].set_title('Validation Accuracy')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Accuracy')
-    axes[1].legend()
+        for model_name in model_names:
+            axes[0].plot(all_results[model_name]['train_loss'], label=model_name)
+            axes[1].plot(all_results[model_name]['val_acc'], label=model_name)
+            axes[2].plot(all_results[model_name]['val_f1'], label=model_name)
 
-    axes[2].set_title('Validation F1 (Macro)')
-    axes[2].set_xlabel('Epoch')
-    axes[2].set_ylabel('F1')
-    axes[2].legend()
+        axes[0].set_title('Train Loss')
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Loss')
+        axes[0].legend()
 
-    plt.tight_layout()
-    plt.savefig('drug_drug_comparison.png')
-    print("\nSaved plot to drug_drug_comparison.png")
+        axes[1].set_title('Validation Accuracy')
+        axes[1].set_xlabel('Epoch')
+        axes[1].set_ylabel('Accuracy')
+        axes[1].legend()
 
-    # Summary Table
-    summary = pd.DataFrame({
+        axes[2].set_title('Validation F1 (Macro)')
+        axes[2].set_xlabel('Epoch')
+        axes[2].set_ylabel('F1')
+        axes[2].legend()
+
+        plt.tight_layout()
+        plt.savefig(seed_output_dir / 'training_curves.png', dpi=150)
+        plt.close()
+
+        # Save summary for this seed
+        summary = pd.DataFrame({
+            'Model': model_names,
+            'Best Val Acc': [max(all_results[m]['val_acc']) for m in model_names],
+            'Best Val F1': [max(all_results[m]['val_f1']) for m in model_names],
+            'Test Acc': [all_results[m]['test_acc'] for m in model_names],
+            'Test F1': [all_results[m]['test_f1'] for m in model_names],
+        })
+        summary.to_csv(seed_output_dir / 'results_summary.csv', index=False)
+        print(f"\nSaved results to {seed_output_dir}")
+
+    # Aggregate results across all seeds
+    print(f"\n{'='*70}")
+    print("AGGREGATED RESULTS")
+    print(f"{'='*70}\n")
+    
+    aggregated_summary = pd.DataFrame({
         'Model': model_names,
-        'Best Val Acc': [max(all_results[m]['val_acc']) for m in model_names],
-        'Best Val F1': [max(all_results[m]['val_f1']) for m in model_names],
-        'Final Train Loss': [all_results[m]['train_loss'][-1] for m in model_names],
+        'Val_Acc_Mean': [np.mean(all_seed_results[m]['val_acc']) for m in model_names],
+        'Val_Acc_Std': [np.std(all_seed_results[m]['val_acc']) for m in model_names],
+        'Val_F1_Mean': [np.mean(all_seed_results[m]['val_f1']) for m in model_names],
+        'Val_F1_Std': [np.std(all_seed_results[m]['val_f1']) for m in model_names],
+        'Test_Acc_Mean': [np.mean(all_seed_results[m]['test_acc']) for m in model_names],
+        'Test_Acc_Std': [np.std(all_seed_results[m]['test_acc']) for m in model_names],
+        'Test_F1_Mean': [np.mean(all_seed_results[m]['test_f1']) for m in model_names],
+        'Test_F1_Std': [np.std(all_seed_results[m]['test_f1']) for m in model_names],
     })
-    summary.to_csv('drug_drug_comparison.csv', index=False)
-    print("\nSaved summary to drug_drug_comparison.csv")
-    print(summary)
+    
+    aggregated_summary.to_csv(output_dir / 'aggregated_results.csv', index=False)
+    print(aggregated_summary)
+    print(f"\nSaved to {output_dir / 'aggregated_results.csv'}")
+
+    print(f"\n{'#'*70}")
+    print("ALL EXPERIMENTS COMPLETE!")
+    print(f"Results saved to: {output_dir}")
+    print(f"{'#'*70}")
 
 
 if __name__ == '__main__':

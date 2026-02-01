@@ -477,3 +477,37 @@ class SetGraphClassifier(nn.Module):
         return self.classifier(set_emb)
 
 
+# Simple GCN baseline (processes individual graphs, no sets)
+class GCNGraphClassifier(nn.Module):
+    """Simple GCN for single graph classification (no set processing)."""
+    
+    def __init__(self, in_channels, hidden_dim, num_classes, dropout=0.1):
+        super().__init__()
+        
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        
+        self.classifier = nn.Linear(hidden_dim, num_classes)
+    
+    def forward(self, data):
+        """Process individual graphs (no set_batch needed)."""
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        
+        # GCN layers with dropout
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv3(x, edge_index))
+        x = self.dropout(x)
+        
+        # Pool to get graph-level embeddings
+        graph_emb = global_mean_pool(x, batch)
+        
+        # Classify
+        return self.classifier(graph_emb)
+
+

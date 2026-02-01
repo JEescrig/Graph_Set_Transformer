@@ -1,5 +1,12 @@
 from .models import (
-    GraphSetTransformerGraphClassifier,
     SetTransformerGraphClassifier,
     DeepSetGraphClassifier,
+    SetGraphClassifier,
+    GCNGraphClassifier,
+)
+from .model_dropout import (
+    SetTransformerGraphClassifier as SetTransformerDropout,
+    DeepSetGraphClassifier as DeepSetDropout,
+    SetGraphClassifier as SetGraphDropout,
+    GCNGraphClassifier as GCNDropout,
 )
