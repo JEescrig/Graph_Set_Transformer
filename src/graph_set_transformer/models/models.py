@@ -22,6 +22,10 @@ from torch_geometric.nn.models import GCN
 from torch_geometric.utils import scatter
 from torch_geometric.utils import to_dense_batch
 
+import warnings
+
+warnings.filterwarnings("ignore", message=".*torch-scatter.*")
+
 
 # from sklearn.metrics import roc_auc_score
 class GraphSetTransformerGraphClassifier(nn.Module):
@@ -383,10 +387,10 @@ class GraphSetConv(nn.Module):
         activation="relu",
         mhsa_dropout=0.2,
         ffn_dropout=0.2,
-        gcn_dropout=0.2,
+        gcn_dropout=0.1,
         pooling="mean",
-        use_gating=True,
-        ffn_multiplier=8,
+        use_gating=False,
+        ffn_multiplier=1,
         num_heads=4,
     ):
         super().__init__()
@@ -423,11 +427,11 @@ class GraphSetConv(nn.Module):
         )
         self.ln_post_ffn = nn.LayerNorm(filters)
 
-        # if use_gating:
-        #     self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
-
         if use_gating:
-            self.gate = GatedFusion(dim=filters, init_tau=2.0)
+            self.gate = nn.Sequential(nn.Linear(filters * 2, filters), nn.Sigmoid())
+
+        # if use_gating:
+        #     self.gate = GatedFusion(dim=filters, init_tau=2.0)
 
         self.act = self._build_activation(activation)
 
@@ -460,7 +464,6 @@ class GraphSetConv(nn.Module):
 
         x = self.gcn_layer(x, edge_index)
         x = self.gcn_norms(x)
-        x = self.act(x)
         x = self.gcn_dropout(x)
 
         z = self._pool_graphs(x, batch)
@@ -468,41 +471,44 @@ class GraphSetConv(nn.Module):
         z_dense, mask = to_dense_batch(z, set_batch)
         mask = mask.to(dtype=torch.bool, device=z_dense.device)
 
-        z_norm = self.ln_pre(z_dense)
+        # z_norm = self.ln_pre(z_dense)
 
-        z_attn, attn_weights = self.mha(z_norm, z_norm, z_norm, key_padding_mask=~mask)
-        # z_attn = self.mha_dropout(z_attn)
+        z_attn, attn_weights = self.mha(
+            z_dense, z_dense, z_dense, key_padding_mask=~mask
+        )
         z_dense = self.ln_post_attn(z_dense + z_attn)
 
-        z_ffn = self.ffn(z_dense)
-        z_dense = self.ln_post_ffn(z_dense + z_ffn)
+        # z_ffn = self.ffn(z_dense)
+        # z_dense = self.ln_post_ffn(z_dense + z_ffn)
 
         z_out = z_dense[mask]
 
         set_info = z_out[batch]
 
         if self.use_gating:
-            # gate_input = torch.cat([x, set_info], dim=-1)
-            # gate_values = self.gate(gate_input)
-            # x_out = gate_values * set_info + (1 - gate_values) * x
-            x_out = self.gate(x, set_info)
+            gate_input = torch.cat([x, set_info], dim=-1)
+            gate_values = self.gate(gate_input)
+            x_out = gate_values * set_info + (1 - gate_values) * x
+            # x_out = self.gate(x, set_info)
         else:
             x_out = x + set_info
 
-        return x_out
+        # return x_out
+
+        return self.act(x)
 
 
 class GraphSetTransformerGraphClassifier(nn.Module):
     def __init__(self, in_channels, hidden_dim, num_classes, dropout=0.1):
         super().__init__()
         self.setconv1 = GraphSetConv(
-            filters=hidden_dim, in_channels=in_channels, activation="gelu"
+            filters=hidden_dim, in_channels=in_channels, pooling="max"
         )
         self.setconv2 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+            filters=hidden_dim, in_channels=hidden_dim, pooling="max"
         )
         self.setconv3 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
+            filters=hidden_dim, in_channels=hidden_dim, pooling="max"
         )
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim, num_classes)

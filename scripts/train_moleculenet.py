@@ -115,13 +115,14 @@ def main():
 
     # Parameters
     model_names = ["SetTransformer", "DeepSets", "GraphSetConv"]
+    # model_names = ["DeepSets", "GraphSetConv"]
     # model_names = ["GraphSetConv"]
+    learning_rates = {"SetTransformer": 1e-3, "DeepSets": 1e-3, "GraphSetConv": 1e-4}
+    hidden_dims = {"SetTransformer": 32, "DeepSets": 64, "GraphSetConv": 64}
     # set_sizes = [5, 10, 20]
-    set_sizes = [10]
-    num_epochs = 500
-    hidden_dim = 64
+    set_sizes = [10, 5, 2]
+    num_epochs = 1000
     batch_size = 32
-    learning_rate = 1e-4
     num_trials = 5
     use_class_weights = False
 
@@ -138,7 +139,7 @@ def main():
     }
 
     train_dataset, val_dataset, test_dataset, tasks = molecule_net_loader(
-        "bace", "data/moleculenet/bace.csv.xz"
+        "bace", "data/moleculenet/bace.csv.xz", use_scaffold_split=True
     )
 
     in_channels = train_dataset[0].x.shape[1]
@@ -181,6 +182,19 @@ def main():
             collate_fn=collate_sets,
         )
 
+        # train_sets = make_label_homogeneous_sets(train_dataset, set_size, shuffle=False)
+        train_sets = make_label_homogeneous_sets(train_dataset, set_size, shuffle=False)
+        train_set_dataset = SetDataset(train_sets)
+        balanced_sampler = BalancedSetBatchSampler(train_set_dataset, batch_size)
+
+        train_loader = TorchDataLoader(
+            train_set_dataset,
+            # batch_size=batch_size,
+            # shuffle=True,
+            batch_sampler=balanced_sampler,
+            collate_fn=collate_sets,
+        )
+
         for trial in range(num_trials):
             print(f"\n{'#'*60}")
             print(f"# SET SIZE: {set_size} - TRIAL {trial + 1}/{num_trials}")
@@ -200,52 +214,46 @@ def main():
                 )
                 print(f"{'='*50}")
 
-                model = get_model(model_name, in_channels, hidden_dim, num_classes)
-                model = model.to(device)
-                optimizer = torch.optim.Adam(
-                    model.parameters(),
-                    lr=learning_rate,
+                model = get_model(
+                    model_name, in_channels, hidden_dims[model_name], num_classes
                 )
+                model = model.to(device)
+                # optimizer = torch.optim.Adam(
+                #     model.parameters(), lr=learning_rates[model_name], weight_decay=1e-3
+                # )
+                optimizer = torch.optim.AdamW(
+                    model.parameters(),
+                    lr=learning_rates[model_name],
+                    weight_decay=0.01,
+                    betas=(0.9, 0.999),
+                )
+
+                # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                #     optimizer, T_max=num_epochs, eta_min=1e-5
+                # )
 
                 best_val_auroc = 0
                 best_model_state = None
 
                 for epoch in range(num_epochs):
-                    # train_sets = make_label_homogeneous_sets_rand_card(
-                    #     train_dataset, max_size=10
-                    # )
-                    train_sets = make_label_homogeneous_sets(
-                        train_dataset, set_size, shuffle=True
-                    )
-                    train_set_dataset = SetDataset(train_sets)
-
-                    balanced_sampler = BalancedSetBatchSampler(
-                        train_set_dataset, batch_size=batch_size, num_classes=2
-                    )
-
-                    train_loader = TorchDataLoader(
-                        train_set_dataset,
-                        # batch_size=batch_size,
-                        # shuffle=True,
-                        batch_sampler=balanced_sampler,
-                        collate_fn=collate_sets,
-                    )
 
                     if epoch == 0 and trial == 0:
                         print(f"\nVerifying batch balance for epoch 1:")
                         for i, (data, set_batch, targets) in enumerate(train_loader):
                             class_counts = torch.bincount(targets)
                             print(f"  Batch {i}: {class_counts.tolist()}")
-                            if i >= 2:  # Just show first 3 batches
-                                break
+                            # if i >= 2:  # Just show first 3 batches
+                            #     break
 
                     # Train with class weights
                     train_loss = train_epoch(
                         model, train_loader, optimizer, device, class_weights
                     )
+                    # scheduler.step()
 
                     # Validate
                     val_auroc = evaluate(model, val_loader, device)
+                    test_auroc = evaluate(model, test_loader, device)
 
                     # Save Results
                     trial_results[model_name]["train_loss"].append(train_loss)
@@ -259,7 +267,7 @@ def main():
 
                     if (epoch + 1) % 10 == 0:
                         print(
-                            f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val AUROC: {val_auroc:.4f}"
+                            f"Epoch {epoch+1}/{num_epochs} - Train Loss: {train_loss:.4f}, Val AUROC: {val_auroc:.4f}, Test AUROC: {test_auroc:.4f}"
                         )
 
                 print(f"Best Val AUROC for {model_name}: {best_val_auroc:.4f}")

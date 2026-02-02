@@ -103,39 +103,33 @@ def collate_sets(batch_of_sets, verbose=False):
 #     return sets
 
 
-def make_label_homogeneous_sets(dataset, set_size, shuffle=False):
-    # Group by label
+def make_label_homogeneous_sets(dataset, set_size, shuffle=False, seed=None):
+    if seed is not None:
+        random.seed(seed)
+
     label_groups = defaultdict(list)
     for data in dataset:
         label_groups[int(data.y.item())].append(data)
 
+    print(len(label_groups[0]), len(label_groups[1]))
+
     sets = []
     for label, graphs in label_groups.items():
         n = len(graphs)
-
-        # For each graph, create a set with it and (set_size - 1) random others
         used = set()
         for i in range(n):
-            # if i in used:
-            #     continue
-            # Start with the current graph
+            if i in used:
+                continue
             current_set = [graphs[i]]
-
-            # Add (set_size - 1) random other graphs from the same label
-            # Sample with replacement if we don't have enough graphs
             other_indices = [j for j in range(n) if j != i]
-
             if len(other_indices) >= set_size - 1:
-                # Sample without replacement
                 sampled_indices = random.sample(other_indices, set_size - 1)
             else:
-                # Sample with replacement if we don't have enough graphs
                 sampled_indices = random.choices(other_indices, k=set_size - 1)
-
             used.update(sampled_indices)
-
             current_set.extend([graphs[j] for j in sampled_indices])
             sets.append((current_set, label))
+
     if shuffle:
         random.shuffle(sets)
 
