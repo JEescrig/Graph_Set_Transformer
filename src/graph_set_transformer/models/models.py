@@ -27,30 +27,6 @@ import warnings
 warnings.filterwarnings("ignore", message=".*torch-scatter.*")
 
 
-# from sklearn.metrics import roc_auc_score
-class GraphSetTransformerGraphClassifier(nn.Module):
-    def __init__(self, in_channels, hidden_dim, num_classes):
-        super().__init__()
-        self.setconv1 = GraphSetConv(
-            filters=hidden_dim, in_channels=in_channels, activation="gelu"
-        )
-        self.setconv2 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
-        )
-        self.setconv3 = GraphSetConv(
-            filters=hidden_dim, in_channels=hidden_dim, activation="gelu"
-        )
-
-    def forward(self, data, set_batch):
-        x, edge_index, batch = data.x, data.edge_index, data.batch
-        x = self.setconv1(x, edge_index, batch, set_batch)
-        x = self.setconv2(x, edge_index, batch, set_batch)
-        x = self.setconv3(x, edge_index, batch, set_batch)
-        graph_emb = global_mean_pool(x, batch)
-        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
-        return self.classifier(set_emb)
-
-
 class GCNClassifier(nn.Module):
     def __init__(
         self, in_channels, hidden_dim, num_classes, aggregator="sum", dropout=0.2
@@ -211,6 +187,7 @@ class SetTransformerGraphClassifier(nn.Module):
 
         self.gcn = GCN(in_channels, hidden_dim, 3, hidden_dim, dropout=dropout)
         self.set_transformer = SetTransformer(hidden_dim, 1, hidden_dim)
+        self.dropout = nn.Dropout(0.1)
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, data, set_batch):
@@ -224,6 +201,7 @@ class SetTransformerGraphClassifier(nn.Module):
         set_emb = self.set_transformer(z_padded, key_padding_mask)
 
         set_emb = set_emb.squeeze(1)
+        set_emb = self.dropout(set_emb)
 
         return self.classifier(set_emb)
 
@@ -385,11 +363,11 @@ class GraphSetConv(nn.Module):
         filters,
         in_channels,
         activation="relu",
-        mhsa_dropout=0.2,
-        ffn_dropout=0.2,
-        gcn_dropout=0.1,
+        mhsa_dropout=0.3,
+        ffn_dropout=0.3,
+        gcn_dropout=0.3,
         pooling="mean",
-        use_gating=False,
+        use_gating=True,
         ffn_multiplier=1,
         num_heads=4,
     ):
@@ -471,15 +449,15 @@ class GraphSetConv(nn.Module):
         z_dense, mask = to_dense_batch(z, set_batch)
         mask = mask.to(dtype=torch.bool, device=z_dense.device)
 
-        # z_norm = self.ln_pre(z_dense)
+        z_norm = self.ln_pre(z_dense)
 
+        z_normed = self.ln_post_attn(z_dense)
         z_attn, attn_weights = self.mha(
             z_dense, z_dense, z_dense, key_padding_mask=~mask
         )
-        z_dense = self.ln_post_attn(z_dense + z_attn)
 
-        # z_ffn = self.ffn(z_dense)
-        # z_dense = self.ln_post_ffn(z_dense + z_ffn)
+        z_ffn = self.ffn(z_dense)
+        z_dense = self.ln_post_ffn(z_dense + z_ffn)
 
         z_out = z_dense[mask]
 
@@ -493,9 +471,7 @@ class GraphSetConv(nn.Module):
         else:
             x_out = x + set_info
 
-        # return x_out
-
-        return self.act(x)
+        return self.act(x_out)
 
 
 class GraphSetTransformerGraphClassifier(nn.Module):

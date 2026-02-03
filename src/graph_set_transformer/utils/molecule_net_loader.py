@@ -128,7 +128,7 @@ def molecule_net_loader(
 
     df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
 
-    if scaffold_split:
+    if use_scaffold_split:
         train_ids, valid_ids, test_ids = scaffold_split(df, 0.1, 0.1, seed)
     else:
         shuffled_ids = df.index.numpy()
