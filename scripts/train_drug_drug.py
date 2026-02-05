@@ -165,7 +165,6 @@ def evaluate(model, loader, device, num_classes=None):
     try:
         auroc = roc_auc_score(all_targets, all_probs, multi_class='ovr', average='macro')
     except ValueError:
-        # Handle case where a class is not present in targets
         auroc = float('nan')
     
     try:
