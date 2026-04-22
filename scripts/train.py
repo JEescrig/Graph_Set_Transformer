@@ -44,29 +44,17 @@ def load_dataset(dataset_name):
     return dataset
 
 
-def _align_targets(pred, targets, set_batch):
-    """Align targets to pred shape. If pred is per-graph and targets are per-graph,
-    use directly. If pred is per-set, aggregate per-graph targets to per-set."""
-    if pred.size(0) == targets.size(0):
-        return targets
-    num_sets = int(set_batch.max()) + 1
-    set_targets = torch.zeros(num_sets, dtype=targets.dtype, device=targets.device)
-    set_targets.scatter_(0, set_batch, targets)
-    return set_targets
-
-
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
-    for data, set_batch, targets in loader:
+    for data, set_batch, set_labels, _ in loader:
         data = data.to(device)
         set_batch = set_batch.to(device)
-        targets = targets.to(device)
+        set_labels = set_labels.to(device)
 
         optimizer.zero_grad()
         pred = model(data, set_batch)
-        targets = _align_targets(pred, targets, set_batch)
-        loss = F.cross_entropy(pred, targets)
+        loss = F.cross_entropy(pred, set_labels)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -78,15 +66,14 @@ def evaluate(model, loader, device):
     model.eval()
     all_probs, all_targets = [], []
     with torch.no_grad():
-        for data, set_batch, targets in loader:
+        for data, set_batch, set_labels, _ in loader:
             data = data.to(device)
             set_batch = set_batch.to(device)
-            targets = targets.to(device)
+            set_labels = set_labels.to(device)
             logits = model(data, set_batch)
-            targets = _align_targets(logits, targets, set_batch)
             probs = F.softmax(logits, dim=1)[:, 1]
             all_probs.extend(probs.cpu().numpy())
-            all_targets.extend(targets.cpu().numpy())
+            all_targets.extend(set_labels.cpu().numpy())
 
     return roc_auc_score(all_targets, all_probs)
 

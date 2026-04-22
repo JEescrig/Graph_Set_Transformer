@@ -3,6 +3,9 @@ from .models import (
     DeepSetGraphClassifier,
     SetGraphClassifier,
     GCNGraphClassifier,
+    SetTransformerGraphMultiTask,
+    DeepSetGraphMultiTask,
+    SetGraphMultiTask,
 )
 from .model_dropout import (
     SetTransformerGraphClassifier as SetTransformerDropout,
@@ -10,3 +13,6 @@ from .model_dropout import (
     SetGraphClassifier as SetGraphDropout,
     GCNGraphClassifier as GCNDropout,
 )
+
+GraphSetTransformerGraphClassifier = SetGraphClassifier
+GraphSetTransformerGraphMultiTask = SetGraphMultiTask

@@ -28,6 +28,40 @@ def scatter_mean(src, index, dim=0, dim_size=None):
     return scatter(src, index, dim=dim, dim_size=dim_size, reduce='mean')
 
 
+def pad_graph_embeddings_to_sets(graph_emb, set_batch):
+    num_graphs = graph_emb.size(0)
+    hidden_dim = graph_emb.size(1)
+    device = graph_emb.device
+
+    num_sets = int(set_batch.max()) + 1
+    set_sizes = scatter_add(
+        torch.ones_like(set_batch), set_batch, dim=0, dim_size=num_sets
+    )
+    max_set_size = int(set_sizes.max())
+
+    sorted_indices = torch.argsort(set_batch)
+    sorted_set_batch = set_batch[sorted_indices]
+
+    ones = torch.ones(num_graphs, dtype=torch.long, device=device)
+    cumsum = torch.cumsum(ones, dim=0)
+    set_offsets = torch.zeros(num_sets + 1, dtype=torch.long, device=device)
+    set_offsets[1:] = torch.cumsum(set_sizes, dim=0)
+    positions_sorted = cumsum - 1 - set_offsets[sorted_set_batch]
+
+    positions = torch.empty_like(positions_sorted)
+    positions[sorted_indices] = positions_sorted
+
+    padded = torch.zeros(num_sets, max_set_size, hidden_dim, device=device)
+    padded[set_batch, positions] = graph_emb
+
+    key_padding_mask = torch.ones(
+        num_sets, max_set_size, dtype=torch.bool, device=device
+    )
+    key_padding_mask[set_batch, positions] = False
+
+    return padded, key_padding_mask
+
+
 class SetDataset(Dataset):
     def __init__(self, sets):
         self.sets = sets
@@ -214,38 +248,7 @@ class SetTransformerGraphClassifier(nn.Module):
         return self.classifier(set_emb)
 
     def _pad_to_sets(self, graph_emb, set_batch):
-        num_graphs = graph_emb.size(0)
-        hidden_dim = graph_emb.size(1)
-        device = graph_emb.device
-
-        num_sets = int(set_batch.max()) + 1
-        set_sizes = scatter_add(
-            torch.ones_like(set_batch), set_batch, dim=0, dim_size=num_sets
-        )
-        max_set_size = int(set_sizes.max())
-
-        sorted_indices = torch.argsort(set_batch)
-        sorted_set_batch = set_batch[sorted_indices]
-
-        ones = torch.ones(num_graphs, dtype=torch.long, device=device)
-        cumsum = torch.cumsum(ones, dim=0)
-        set_offsets = torch.zeros(num_sets + 1, dtype=torch.long, device=device)
-        set_offsets[1:] = torch.cumsum(set_sizes, dim=0)
-        positions_sorted = cumsum - 1 - set_offsets[sorted_set_batch]
-
-        positions = torch.empty_like(positions_sorted)
-        positions[sorted_indices] = positions_sorted
-
-        # Padding 
-        z_padded = torch.zeros(num_sets, max_set_size, hidden_dim, device=device)
-        z_padded[set_batch, positions] = graph_emb
-
-        key_padding_mask = torch.ones(
-            num_sets, max_set_size, dtype=torch.bool, device=device
-        )
-        key_padding_mask[set_batch, positions] = False
-
-        return z_padded, key_padding_mask
+        return pad_graph_embeddings_to_sets(graph_emb, set_batch)
 
 # DeepSets (adapted from the barebones original implementation)
 
@@ -322,34 +325,8 @@ class DeepSetGraphClassifier(nn.Module):
         return self.deepsets(x_padded)
 
     def _pad_to_sets(self, graph_emb, set_batch):
-        num_graphs = graph_emb.size(0)
-        hidden_dim = graph_emb.size(1)
-        device = graph_emb.device
-
-        num_sets = int(set_batch.max()) + 1
-        set_sizes = scatter_add(
-            torch.ones_like(set_batch), set_batch, dim=0, dim_size=num_sets
-        )
-        max_set_size = int(set_sizes.max())
-
-        # Compute positions within each set
-        sorted_indices = torch.argsort(set_batch)
-        sorted_set_batch = set_batch[sorted_indices]
-
-        ones = torch.ones(num_graphs, dtype=torch.long, device=device)
-        cumsum = torch.cumsum(ones, dim=0)
-        set_offsets = torch.zeros(num_sets + 1, dtype=torch.long, device=device)
-        set_offsets[1:] = torch.cumsum(set_sizes, dim=0)
-        positions_sorted = cumsum - 1 - set_offsets[sorted_set_batch]
-
-        positions = torch.empty_like(positions_sorted)
-        positions[sorted_indices] = positions_sorted
-
-        # Create padded tensor
-        x_padded = torch.zeros(num_sets, max_set_size, hidden_dim, device=device)
-        x_padded[set_batch, positions] = graph_emb
-
-        return x_padded
+        padded, _ = pad_graph_embeddings_to_sets(graph_emb, set_batch)
+        return padded
 
 
 
@@ -500,7 +477,133 @@ class SetGraphClassifier(nn.Module):
         x = self.setconv3(x, edge_index, batch, set_batch)
         x = self.dropout(x)  # Apply dropout
         graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden]
-        return self.classifier(graph_emb)  # [num_graphs, num_classes]
+        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
+        return self.classifier(set_emb)
+
+
+class SetTransformerGraphMultiTask(nn.Module):
+    def __init__(self, in_channels, hidden_dim, dropout=0.1):
+        super().__init__()
+
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+        self.set_transformer = SetTransformer(hidden_dim, 1, hidden_dim)
+        self.set_classifier = nn.Linear(hidden_dim, 1)
+        self.graph_regressor = nn.Linear(hidden_dim, 1)
+
+    def encode_graphs(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv3(x, edge_index))
+        x = self.dropout(x)
+
+        return global_mean_pool(x, batch)
+
+    def forward(self, data, set_batch):
+        graph_emb = self.encode_graphs(data)
+        padded, key_padding_mask = pad_graph_embeddings_to_sets(graph_emb, set_batch)
+        set_emb = self.set_transformer(padded, key_padding_mask).squeeze(1)
+
+        set_logits = self.set_classifier(set_emb).squeeze(-1)
+        graph_regression = self.graph_regressor(graph_emb).squeeze(-1)
+        return set_logits, graph_regression
+
+
+class DeepSetGraphMultiTask(nn.Module):
+    def __init__(self, in_channels, hidden_dim, aggregator="sum", dropout=0.1):
+        super().__init__()
+
+        self.conv1 = GCNConv(in_channels, hidden_dim)
+        self.conv2 = GCNConv(hidden_dim, hidden_dim)
+        self.conv3 = GCNConv(hidden_dim, hidden_dim)
+        self.act = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+        self.deepsets_encoder = DeepSets(
+            input_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            output_dim=hidden_dim,
+            aggregator=aggregator,
+            dropout=dropout,
+        )
+        self.set_classifier = nn.Linear(hidden_dim, 1)
+        self.graph_regressor = nn.Linear(hidden_dim, 1)
+
+    def encode_graphs(self, data):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        x = self.act(self.conv1(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv2(x, edge_index))
+        x = self.dropout(x)
+        x = self.act(self.conv3(x, edge_index))
+        x = self.dropout(x)
+
+        return global_mean_pool(x, batch)
+
+    def forward(self, data, set_batch):
+        graph_emb = self.encode_graphs(data)
+        padded, _ = pad_graph_embeddings_to_sets(graph_emb, set_batch)
+        set_emb = self.deepsets_encoder(padded)
+
+        set_logits = self.set_classifier(set_emb).squeeze(-1)
+        graph_regression = self.graph_regressor(graph_emb).squeeze(-1)
+        return set_logits, graph_regression
+
+
+class SetGraphMultiTask(nn.Module):
+    def __init__(self, in_channels, hidden_dim, dropout=0.1):
+        super().__init__()
+        self.setconv1 = GraphSetConv(
+            filters=hidden_dim,
+            in_channels=in_channels,
+            activation="relu",
+            mhsa_dropout=dropout,
+            ffn_dropout=dropout,
+        )
+        self.setconv2 = GraphSetConv(
+            filters=hidden_dim,
+            in_channels=hidden_dim,
+            activation="relu",
+            mhsa_dropout=dropout,
+            ffn_dropout=dropout,
+        )
+        self.setconv3 = GraphSetConv(
+            filters=hidden_dim,
+            in_channels=hidden_dim,
+            activation="relu",
+            mhsa_dropout=dropout,
+            ffn_dropout=dropout,
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.set_classifier = nn.Linear(hidden_dim, 1)
+        self.graph_regressor = nn.Linear(hidden_dim, 1)
+
+    def encode_graphs(self, data, set_batch):
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+        x = self.setconv1(x, edge_index, batch, set_batch)
+        x = self.dropout(x)
+        x = self.setconv2(x, edge_index, batch, set_batch)
+        x = self.dropout(x)
+        x = self.setconv3(x, edge_index, batch, set_batch)
+        x = self.dropout(x)
+        return global_mean_pool(x, batch)
+
+    def forward(self, data, set_batch):
+        graph_emb = self.encode_graphs(data, set_batch)
+        set_emb = scatter_mean(graph_emb, set_batch, dim=0)
+
+        set_logits = self.set_classifier(set_emb).squeeze(-1)
+        graph_regression = self.graph_regressor(graph_emb).squeeze(-1)
+        return set_logits, graph_regression
 
 
 class GCNGraphClassifier(nn.Module):

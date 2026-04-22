@@ -1,9 +1,24 @@
 import random
 from collections import defaultdict
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 from torch_geometric.data import Batch
+
+
+def _extract_graph_targets(data):
+    values = data.y.view(-1)
+    class_label = int(values[0].item())
+    regression_target = float(values[1].item()) if values.numel() > 1 else float(values[0].item())
+    return class_label, regression_target
+
+
+def _extract_set_label(set_item):
+    _, metadata = set_item
+    if isinstance(metadata, dict):
+        return int(metadata["set_label"])
+    return int(metadata)
 
 
 class SetDataset(Dataset):
@@ -23,20 +38,15 @@ class BalancedSetBatchSampler(Sampler):
         self.batch_size = batch_size
         self.num_classes = num_classes
 
-        # Group set indices by their label
         self.class_indices = {i: [] for i in range(num_classes)}
-        for idx, (graph_set, label) in enumerate(dataset):
-            self.class_indices[label].append(idx)
+        for idx, set_item in enumerate(dataset):
+            self.class_indices[_extract_set_label(set_item)].append(idx)
 
-        # Calculate how many sets per class in each batch
         self.sets_per_class = batch_size // num_classes
-
-        # Calculate total number of balanced batches we can create
         min_class_count = min(len(indices) for indices in self.class_indices.values())
         self.num_batches = min_class_count // self.sets_per_class
 
     def __iter__(self):
-        # Shuffle indices within each class
         shuffled_indices = {
             class_id: np.random.permutation(indices).tolist()
             for class_id, indices in self.class_indices.items()
@@ -50,11 +60,9 @@ class BalancedSetBatchSampler(Sampler):
                 end = start + self.sets_per_class
                 batch.extend(shuffled_indices[class_id][start:end])
 
-            # Shuffle within batch so classes aren't always in same order
             np.random.shuffle(batch)
             batches.append(batch)
 
-        # Shuffle the order of batches
         np.random.shuffle(batches)
 
         for batch in batches:
@@ -67,14 +75,20 @@ class BalancedSetBatchSampler(Sampler):
 def collate_sets(batch_of_sets, verbose=False):
     all_graphs = []
     set_assignments = []
-    graph_labels = []
+    set_labels = []
+    graph_regression_targets = []
     class_counts = {}
 
-    for set_idx, (graph_set, label) in enumerate(batch_of_sets):
-        all_graphs.extend(graph_set)
-        set_assignments.extend([set_idx] * len(graph_set))
-        graph_labels.extend([label] * len(graph_set))
-        class_counts[label] = class_counts.get(label, 0) + 1
+    for set_idx, (graph_set, metadata) in enumerate(batch_of_sets):
+        set_label = _extract_set_label((graph_set, metadata))
+        set_labels.append(set_label)
+        class_counts[set_label] = class_counts.get(set_label, 0) + 1
+
+        for graph in graph_set:
+            _, regression_target = _extract_graph_targets(graph)
+            all_graphs.append(graph)
+            set_assignments.append(set_idx)
+            graph_regression_targets.append(regression_target)
 
     if verbose:
         print(f"Batch class distribution: {class_counts}")
@@ -82,81 +96,72 @@ def collate_sets(batch_of_sets, verbose=False):
     return (
         Batch.from_data_list(all_graphs),
         torch.tensor(set_assignments, dtype=torch.long),
-        torch.tensor(graph_labels, dtype=torch.long),
+        torch.tensor(set_labels, dtype=torch.long),
+        torch.tensor(graph_regression_targets, dtype=torch.float32),
     )
 
 
-# def make_label_homogeneous_sets(dataset, set_size):
-#     # Group by label
-#     label_groups = defaultdict(list)
-#     for data in dataset:
-#         label_groups[int(data.y.item())].append(data)
-
-#     sets = []
-
-#     for label, graphs in label_groups.items():
-#         random.shuffle(graphs)
-#         for i in range(0, len(graphs), set_size):
-#             sets.append((graphs[i : i + set_size], label))
-
-#     random.shuffle(sets)
-#     return sets
-
-
 def make_label_homogeneous_sets(dataset, set_size, shuffle=False):
-    # Group by label
     label_groups = defaultdict(list)
     for data in dataset:
-        label_groups[int(data.y.item())].append(data)
+        label, _ = _extract_graph_targets(data)
+        label_groups[label].append(data)
 
     sets = []
     for label, graphs in label_groups.items():
         n = len(graphs)
-
-        # For each graph, create a set with it and (set_size - 1) random others
-        used = set()
         for i in range(n):
-            # if i in used:
-            #     continue
-            # Start with the current graph
             current_set = [graphs[i]]
-
-            # Add (set_size - 1) random other graphs from the same label
-            # Sample with replacement if we don't have enough graphs
             other_indices = [j for j in range(n) if j != i]
 
-            if len(other_indices) >= set_size - 1:
-                # Sample without replacement
-                sampled_indices = random.sample(other_indices, set_size - 1)
-            else:
-                # Sample with replacement if we don't have enough graphs
-                sampled_indices = random.choices(other_indices, k=set_size - 1)
+            if set_size > 1:
+                if not other_indices:
+                    sampled_indices = []
+                elif len(other_indices) >= set_size - 1:
+                    sampled_indices = random.sample(other_indices, set_size - 1)
+                else:
+                    sampled_indices = random.choices(other_indices, k=set_size - 1)
+                current_set.extend([graphs[j] for j in sampled_indices])
 
-            used.update(sampled_indices)
+            sets.append((current_set, {"set_label": label, "set_size": len(current_set)}))
 
-            current_set.extend([graphs[j] for j in sampled_indices])
-            sets.append((current_set, label))
     if shuffle:
         random.shuffle(sets)
 
     return sets
 
 
-def make_label_homogeneous_sets_rand_card(dataset, min_size=1, max_size=10):
+def make_label_homogeneous_sets_rand_card(dataset, min_size=1, max_size=10, shuffle=True):
     label_groups = defaultdict(list)
     for data in dataset:
-        label_groups[int(data.y.item())].append(data)
+        label, _ = _extract_graph_targets(data)
+        label_groups[label].append(data)
 
     sets = []
     for label, graphs in label_groups.items():
-        random.shuffle(graphs)
-        i = 0
-        while i < len(graphs):
-            remaining = len(graphs) - i
-            current_set_size = random.randint(min_size, min(max_size, remaining))
+        n = len(graphs)
+        for i in range(n):
+            current_set_size = random.randint(min_size, max_size)
+            current_set = [graphs[i]]
+            other_indices = [j for j in range(n) if j != i]
 
-            sets.append((graphs[i : i + current_set_size], label))
-            i += current_set_size
+            if current_set_size > 1:
+                if not other_indices:
+                    sampled_indices = []
+                elif len(other_indices) >= current_set_size - 1:
+                    sampled_indices = random.sample(other_indices, current_set_size - 1)
+                else:
+                    sampled_indices = random.choices(other_indices, k=current_set_size - 1)
+                current_set.extend([graphs[j] for j in sampled_indices])
 
-    random.shuffle(sets)
+            sets.append(
+                (
+                    current_set,
+                    {"set_label": label, "set_size": len(current_set)},
+                )
+            )
+
+    if shuffle:
+        random.shuffle(sets)
+
     return sets

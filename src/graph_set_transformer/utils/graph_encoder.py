@@ -278,7 +278,9 @@ class GraphEncoder:
             if G is None:
                 continue
 
-            data = self.nx_to_pyg(G, y=torch.tensor([labels[i]], dtype=label_dtype))
+            label_tensor = torch.as_tensor(np.asarray(labels[i]), dtype=label_dtype)
+            label_tensor = label_tensor.unsqueeze(0)
+            data = self.nx_to_pyg(G, y=label_tensor)
             if data is None:
                 continue
 
