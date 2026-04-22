@@ -42,17 +42,17 @@ class SetDataset(Dataset):
 def collate_sets(batch_of_sets):
     all_graphs = []
     set_assignments = []
-    labels = []
+    graph_labels = []
 
     for set_idx, (graph_set, label) in enumerate(batch_of_sets):
         all_graphs.extend(graph_set)
         set_assignments.extend([set_idx] * len(graph_set))
-        labels.append(label)
+        graph_labels.extend([label] * len(graph_set))
 
     return (
         Batch.from_data_list(all_graphs),
         torch.tensor(set_assignments, dtype=torch.long),
-        torch.tensor(labels, dtype=torch.long),
+        torch.tensor(graph_labels, dtype=torch.long),
     )
 
 
@@ -454,7 +454,7 @@ class GraphSetConv(nn.Module):
 
         set_info = z_out[batch]
 
-        if self.use_gating:
+        if self.use_gating: # wheter use gate mechanism
             gate_input = torch.cat([x, set_info], dim=-1)
             gate_values = self.gate(gate_input)
             x_out = gate_values * set_info + (1 - gate_values) * x
@@ -499,9 +499,8 @@ class SetGraphClassifier(nn.Module):
         x = self.dropout(x)  # Apply dropout
         x = self.setconv3(x, edge_index, batch, set_batch)
         x = self.dropout(x)  # Apply dropout
-        graph_emb = global_mean_pool(x, batch)
-        set_emb = scatter_add(graph_emb, set_batch, dim=0)
-        return self.classifier(set_emb)
+        graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden]
+        return self.classifier(graph_emb)  # [num_graphs, num_classes]
 
 
 class GCNGraphClassifier(nn.Module):
@@ -637,6 +636,12 @@ def main():
 
             optimizer.zero_grad()
             pred = model(data, set_batch)
+            # Align targets to pred shape (per-graph vs per-set)
+            if pred.size(0) != targets.size(0):
+                num_sets = int(set_batch.max()) + 1
+                set_targets = torch.zeros(num_sets, dtype=targets.dtype, device=targets.device)
+                set_targets.scatter_(0, set_batch, targets)
+                targets = set_targets
             loss = F.cross_entropy(pred, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -654,8 +659,14 @@ def main():
                 set_batch = set_batch.to(device)
                 targets = targets.to(device)
 
-                logits = model(data, set_batch)  # shape (N, 2)
-                probs = F.softmax(logits, dim=1)[:, 1]  # positive class
+                logits = model(data, set_batch)
+                # Align targets to pred shape
+                if logits.size(0) != targets.size(0):
+                    num_sets = int(set_batch.max()) + 1
+                    set_targets = torch.zeros(num_sets, dtype=targets.dtype, device=targets.device)
+                    set_targets.scatter_(0, set_batch, targets)
+                    targets = set_targets
+                probs = F.softmax(logits, dim=1)[:, 1]
 
                 all_probs.append(probs.cpu())
                 all_targets.append(targets.cpu())

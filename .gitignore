@@ -235,3 +235,8 @@ data/*/raw/*.pt
 scripts/data/*/processed/*.pt
 scripts/data/*/raw/*.pt
 EGNN/
+
+# codex
+.codex
+docs
+tasks

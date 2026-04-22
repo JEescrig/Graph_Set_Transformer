@@ -472,9 +472,8 @@ class SetGraphClassifier(nn.Module):
         x = self.dropout(x)  # Apply dropout
         x = self.setconv3(x, edge_index, batch, set_batch)
         x = self.dropout(x)  # Apply dropout
-        graph_emb = global_mean_pool(x, batch)
-        set_emb = scatter_add(graph_emb, set_batch, dim=0)
-        return self.classifier(set_emb)
+        graph_emb = global_mean_pool(x, batch)  # [num_graphs, hidden]
+        return self.classifier(graph_emb)  # [num_graphs, num_classes]
 
 
 # Simple GCN baseline (processes individual graphs, no sets)

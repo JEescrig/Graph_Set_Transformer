@@ -123,6 +123,18 @@ def load_drug_drug_from_smiles(data_dir):
     return train_sets, val_sets, test_sets
 
 
+def _align_targets(pred, targets, set_batch):
+    """Align targets to pred shape. If pred is per-graph and targets are per-graph,
+    use directly. If pred is per-set, aggregate per-graph targets to per-set."""
+    if pred.size(0) == targets.size(0):
+        return targets
+    # pred is per-set, derive set-level labels (all graphs in a set share the same label)
+    num_sets = int(set_batch.max()) + 1
+    set_targets = torch.zeros(num_sets, dtype=targets.dtype, device=targets.device)
+    set_targets.scatter_(0, set_batch, targets)
+    return set_targets
+
+
 def train_epoch(model, loader, optimizer, device):
     model.train()
     total_loss = 0
@@ -133,6 +145,7 @@ def train_epoch(model, loader, optimizer, device):
 
         optimizer.zero_grad()
         pred = model(data, set_batch)
+        targets = _align_targets(pred, targets, set_batch)
         loss = F.cross_entropy(pred, targets)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -148,7 +161,9 @@ def evaluate(model, loader, device, num_classes=None):
         for data, set_batch, targets in loader:
             data = data.to(device)
             set_batch = set_batch.to(device)
+            targets = targets.to(device)
             logits = model(data, set_batch)
+            targets = _align_targets(logits, targets, set_batch)
             probs = F.softmax(logits, dim=1)
             preds = logits.argmax(dim=1)
             all_preds.extend(preds.cpu().numpy())

@@ -67,13 +67,13 @@ class BalancedSetBatchSampler(Sampler):
 def collate_sets(batch_of_sets, verbose=False):
     all_graphs = []
     set_assignments = []
-    labels = []
+    graph_labels = []
     class_counts = {}
 
     for set_idx, (graph_set, label) in enumerate(batch_of_sets):
         all_graphs.extend(graph_set)
         set_assignments.extend([set_idx] * len(graph_set))
-        labels.append(label)
+        graph_labels.extend([label] * len(graph_set))
         class_counts[label] = class_counts.get(label, 0) + 1
 
     if verbose:
@@ -82,7 +82,7 @@ def collate_sets(batch_of_sets, verbose=False):
     return (
         Batch.from_data_list(all_graphs),
         torch.tensor(set_assignments, dtype=torch.long),
-        torch.tensor(labels, dtype=torch.long),
+        torch.tensor(graph_labels, dtype=torch.long),
     )
 
 
