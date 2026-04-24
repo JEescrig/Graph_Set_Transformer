@@ -7,11 +7,11 @@ from torch.utils.data import Dataset, Sampler
 from torch_geometric.data import Batch
 
 
-def _extract_graph_targets(data):
+def _extract_graph_labels(data):
     values = data.y.view(-1)
     class_label = int(values[0].item())
-    regression_target = float(values[1].item()) if values.numel() > 1 else float(values[0].item())
-    return class_label, regression_target
+    element_label = int(values[0].item())
+    return class_label, element_label
 
 
 def _extract_set_label(set_item):
@@ -76,7 +76,7 @@ def collate_sets(batch_of_sets, verbose=False):
     all_graphs = []
     set_assignments = []
     set_labels = []
-    graph_regression_targets = []
+    element_labels = []
     class_counts = {}
 
     for set_idx, (graph_set, metadata) in enumerate(batch_of_sets):
@@ -85,10 +85,10 @@ def collate_sets(batch_of_sets, verbose=False):
         class_counts[set_label] = class_counts.get(set_label, 0) + 1
 
         for graph in graph_set:
-            _, regression_target = _extract_graph_targets(graph)
+            _, element_label = _extract_graph_labels(graph)
             all_graphs.append(graph)
             set_assignments.append(set_idx)
-            graph_regression_targets.append(regression_target)
+            element_labels.append(element_label)
 
     if verbose:
         print(f"Batch class distribution: {class_counts}")
@@ -97,14 +97,14 @@ def collate_sets(batch_of_sets, verbose=False):
         Batch.from_data_list(all_graphs),
         torch.tensor(set_assignments, dtype=torch.long),
         torch.tensor(set_labels, dtype=torch.long),
-        torch.tensor(graph_regression_targets, dtype=torch.float32),
+        torch.tensor(element_labels, dtype=torch.long),
     )
 
 
 def make_label_homogeneous_sets(dataset, set_size, shuffle=False):
     label_groups = defaultdict(list)
     for data in dataset:
-        label, _ = _extract_graph_targets(data)
+        label, _ = _extract_graph_labels(data)
         label_groups[label].append(data)
 
     sets = []
@@ -134,7 +134,7 @@ def make_label_homogeneous_sets(dataset, set_size, shuffle=False):
 def make_label_homogeneous_sets_rand_card(dataset, min_size=1, max_size=10, shuffle=True):
     label_groups = defaultdict(list)
     for data in dataset:
-        label, _ = _extract_graph_targets(data)
+        label, _ = _extract_graph_labels(data)
         label_groups[label].append(data)
 
     sets = []
